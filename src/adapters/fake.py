@@ -79,7 +79,7 @@ class FakeOracleGeneratorJudge(BaseOracleGeneratorJudge):
                 return "Through quantum loops."
             return "Unknown quantum architecture."
 
-        # Hub trap query logic
+        # Cross-session hub contamination query logic
         if "favorite color" in q_lower:
             has_target = "p_target" in pids
             noise_count = sum(1 for pid in pids if "noise" in pid)

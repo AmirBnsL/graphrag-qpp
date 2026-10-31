@@ -16,7 +16,7 @@ from src.adapters.fake import FakeEmbedder, FakeOracleGeneratorJudge
 
 
 def create_planted_scenarios() -> list[QuerySample]:
-    """Create two planted query samples: one clean multi-hop bridge, one hub-trap."""
+    """Create two planted query samples: one clean multi-hop bridge, one cross-session hub contamination."""
     # 1. Multi-hop bridge query: query needs bridge connection
     # doc_bridge_1: contains "QuantumInductance" and "JosephsonJunction"
     # doc_bridge_2: contains "JosephsonJunction" and "FluxQubit"
@@ -85,10 +85,10 @@ def create_planted_scenarios() -> list[QuerySample]:
         corpus_passages=passages_bridge,
     )
 
-    # 2. Hub-trap query: doc_target has the answer.
+    # 2. Cross-Session Hub Contamination query: doc_target has the answer.
     # In Flat retrieval: doc_target ranks #1, followed by clean session passages.
     # In Graph retrieval: doc_target contains super-hub entity "AssistantUser" which is linked to 10 noise passages.
-    # Unconstrained PPR diffuses into the super-hub, pushing target out of top-5 (Recall-Relevance Inversion).
+    # Unconstrained PPR diffuses into the super-hub, corrupting context (Recall-Relevance Inversion).
     passages_hub = [
         {
             "passage_id": "p_target",
@@ -139,7 +139,7 @@ def create_planted_scenarios() -> list[QuerySample]:
         )
 
     sample_hub = QuerySample(
-        query_id="q_hub_trap",
+        query_id="q_hub_contamination",
         dataset="synthetic",
         question_type="single-session-assistant",
         question="What is the user favorite color?",
@@ -174,7 +174,7 @@ def test_run_qpp_study_tracer_bullet_behavior():
     # 1. Report structure and query execution
     assert len(report.query_results) == 2
     res_bridge = report.query_results["q_bridge"]
-    res_hub = report.query_results["q_hub_trap"]
+    res_hub = report.query_results["q_hub_contamination"]
 
     # 2. Strict Passage-Budget Parity (ADR-0001): exactly top-5 passages each
     assert len(res_bridge.flat_passages) == 5
@@ -187,9 +187,8 @@ def test_run_qpp_study_tracer_bullet_behavior():
     assert res_bridge.lexical_gain > 0
     assert res_bridge.semantic_gain > 0
 
-    # Hub trap query should suffer Recall-Relevance Inversion (negative GraphRAG gain)
+    # Cross-session hub contamination query should suffer Recall-Relevance Inversion (negative GraphRAG gain)
     assert res_hub.lexical_gain < 0
-    assert res_hub.semantic_gain < 0
     assert res_hub.semantic_gain < 0
 
     # 4. Candidate Subgraph extraction and invariants (ADR-0003, ADR-0006)
@@ -199,9 +198,10 @@ def test_run_qpp_study_tracer_bullet_behavior():
     assert subgraph.ppr_shallow is not None
     assert subgraph.ppr_deep is not None
     assert subgraph.ppr_drift is not None
+    assert isinstance(subgraph.ppr_entropy_drift, float)
     assert subgraph.directional_distance_encoding is not None
     # Verify no raw 1024-dim text embeddings in candidate subgraph node features
-    assert subgraph.node_features.shape[1] < 32  # Strictly compact domain-agnostic features
+    assert subgraph.node_features.shape[1] < 32  # Strictly compact domain-agnostic features (12 features)
 
     # 5. Classical Flat QPP evaluation under Conservative Graph Abstention (ADR-0005)
     assert "avg_idf" in report.classical_qpp_results
@@ -210,6 +210,11 @@ def test_run_qpp_study_tracer_bullet_behavior():
     assert "mst_homophily" in report.classical_qpp_results
 
     # Conservative Graph Abstention invariant: routing selection with tau=0.10
-    abstention_stats = report.evaluate_conservative_abstention(tau=0.10)
+    abstention_stats = report.evaluate_conservative_abstention(tau=0.10, target="semantic")
     assert "flat_selected_count" in abstention_stats
     assert "graph_selected_count" in abstention_stats
+
+    # Classical QPP routing policy evaluation
+    classical_routing = report.evaluate_classical_qpp_routing(predictor_key="nqc", percentile_threshold=50.0)
+    assert "flat_selected_count" in classical_routing
+    assert "graph_selected_count" in classical_routing

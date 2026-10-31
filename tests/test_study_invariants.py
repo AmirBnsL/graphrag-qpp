@@ -42,6 +42,7 @@ def test_candidate_subgraph_structural_invariants():
         assert np.all(sub.ppr_shallow >= 0.0)
         assert np.all(sub.ppr_deep >= 0.0)
         assert len(sub.ppr_drift) == sub.num_nodes
+        assert isinstance(sub.ppr_entropy_drift, float)
 
         # 3. Directional distance encoding (DDE) values are valid distances in [0, 4]
         assert np.all(sub.directional_distance_encoding >= 0)

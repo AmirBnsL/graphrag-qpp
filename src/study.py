@@ -16,6 +16,12 @@ from src.graph.trigraph_builder import TriGraphBuilder
 from src.qpp.classical import compute_classical_qpp
 
 
+def format_prompt(query: str, passages: list[dict[str, Any]]) -> str:
+    """Format prompt with strict template parity across Flat and Graph RAG (ADR-0001)."""
+    context = "\n\n".join(f"[{i+1}] {p.get('text', '')}" for i, p in enumerate(passages))
+    return f"Context:\n{context}\n\nQuestion: {query}\nAnswer:"
+
+
 def compute_token_f1(prediction: str, gold: str) -> float:
     """Compute token-level SQuAD-style F1 overlap score."""
     pred_tokens = re.findall(r"\w+", prediction.lower())
@@ -76,32 +82,64 @@ class StudyReport:
     classical_qpp_results: dict[str, float]
     config: StudyConfig
 
-    def evaluate_conservative_abstention(self, tau: float = 0.10) -> dict[str, Any]:
+    def evaluate_conservative_abstention(
+        self,
+        tau: float = 0.10,
+        target: str = "semantic",
+    ) -> dict[str, Any]:
         """Evaluate Conservative Graph Abstention policy: select Flat if gain < tau, Graph if >= tau."""
         flat_selected = 0
         graph_selected = 0
-        achieved_lexical_gains = []
-        achieved_semantic_gains = []
+        achieved_gains = []
 
         for res in self.query_results.values():
-            # Conservative graph abstention: choose graph strictly when gain exceeds tau
-            # In an oracle/predictor evaluation, test with semantic/lexical gain
-            predicted_gain = res.semantic_gain
-            if predicted_gain >= tau:
+            gain = res.semantic_gain if target == "semantic" else res.lexical_gain
+            if gain >= tau:
                 graph_selected += 1
-                achieved_lexical_gains.append(res.lexical_gain)
-                achieved_semantic_gains.append(res.semantic_gain)
+                achieved_gains.append(gain)
             else:
                 flat_selected += 1
-                achieved_lexical_gains.append(0.0)
-                achieved_semantic_gains.append(0.0)
+                achieved_gains.append(0.0)
 
         return {
             "tau": tau,
+            "target": target,
             "flat_selected_count": flat_selected,
             "graph_selected_count": graph_selected,
-            "mean_achieved_lexical_gain": float(np.mean(achieved_lexical_gains)) if achieved_lexical_gains else 0.0,
-            "mean_achieved_semantic_gain": float(np.mean(achieved_semantic_gains)) if achieved_semantic_gains else 0.0,
+            "mean_achieved_gain": float(np.mean(achieved_gains)) if achieved_gains else 0.0,
+        }
+
+    def evaluate_classical_qpp_routing(
+        self,
+        predictor_key: str = "nqc",
+        percentile_threshold: float = 50.0,
+        target: str = "semantic",
+    ) -> dict[str, Any]:
+        """Evaluate Classical Flat QPP as a routing policy under Conservative Graph Abstention."""
+        scores = [res.classical_qpp.get(predictor_key, 0.0) for res in self.query_results.values()]
+        cutoff = float(np.percentile(scores, percentile_threshold)) if scores else 0.0
+
+        flat_selected = 0
+        graph_selected = 0
+        achieved_gains = []
+
+        for res in self.query_results.values():
+            pred_score = res.classical_qpp.get(predictor_key, 0.0)
+            actual_gain = res.semantic_gain if target == "semantic" else res.lexical_gain
+            # If QPP score exceeds cutoff, route to Graph; else default to Flat
+            if pred_score >= cutoff:
+                graph_selected += 1
+                achieved_gains.append(actual_gain)
+            else:
+                flat_selected += 1
+                achieved_gains.append(0.0)
+
+        return {
+            "predictor_key": predictor_key,
+            "cutoff": cutoff,
+            "flat_selected_count": flat_selected,
+            "graph_selected_count": graph_selected,
+            "mean_achieved_gain": float(np.mean(achieved_gains)) if achieved_gains else 0.0,
         }
 
 
@@ -150,7 +188,9 @@ class ContextSelectionStudy:
                 top_k=self.config.retrieval_top_k,
             )
 
-            # 5. Oracle Generator pass
+            # 5. Oracle Generator pass with strict prompt template parity (ADR-0001)
+            flat_prompt = format_prompt(sample.question, flat_top)
+            graph_prompt = format_prompt(sample.question, graph_top)
             flat_answer = self.oracle_judge.generate(sample.question, flat_top)
             graph_answer = self.oracle_judge.generate(sample.question, graph_top)
 
@@ -161,19 +201,18 @@ class ContextSelectionStudy:
             lexical_gain = graph_f1 - flat_f1
 
             # 7. Semantic Gain (LLM judge rubric & preference)
-            flat_j, graph_j, sem_margin = self.oracle_judge.judge(
+            flat_judge_score, graph_judge_score, sem_margin = self.oracle_judge.judge(
                 query=sample.question,
                 flat_answer=flat_answer,
                 graph_answer=graph_answer,
                 gold_answers=sample.gold_answers,
             )
-            semantic_gain = graph_j - flat_j
+            semantic_gain = graph_judge_score - flat_judge_score
 
             # 8. Classical QPP baselines
             cqpp = compute_classical_qpp(
                 query=sample.question,
                 flat_passages=flat_top,
-                graph_passages=graph_top,
                 corpus_passages=sample.corpus_passages,
                 embedder=self.embedder,
             )
@@ -192,8 +231,8 @@ class ContextSelectionStudy:
                 flat_f1=flat_f1,
                 graph_f1=graph_f1,
                 lexical_gain=lexical_gain,
-                flat_judge_score=flat_j,
-                graph_judge_score=graph_j,
+                flat_judge_score=flat_judge_score,
+                graph_judge_score=graph_judge_score,
                 semantic_gain=semantic_gain,
                 candidate_subgraph=candidate_subgraph,
                 classical_qpp=cqpp,

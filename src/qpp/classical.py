@@ -34,7 +34,6 @@ def compute_idf_dict(corpus_passages: list[dict[str, Any]]) -> tuple[dict[str, f
 def compute_classical_qpp(
     query: str,
     flat_passages: list[dict[str, Any]],
-    graph_passages: list[dict[str, Any]],
     corpus_passages: list[dict[str, Any]],
     embedder: BaseEmbedder,
 ) -> dict[str, float]:

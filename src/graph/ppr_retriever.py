@@ -22,8 +22,15 @@ class CandidateSubgraphData:
     ppr_shallow: np.ndarray    # Shape: [N]
     ppr_deep: np.ndarray       # Shape: [N]
     ppr_drift: np.ndarray      # Shape: [N]
+    ppr_entropy_drift: float   # Scalar Shannon entropy drift: H(p_deep) - H(p_shallow)
     directional_distance_encoding: np.ndarray  # Shape: [N]
     node_labels: list[str]
+
+
+def _shannon_entropy(p: np.ndarray) -> float:
+    """Compute Shannon entropy of probability distribution."""
+    pos = p[p > 0]
+    return float(-np.sum(pos * np.log2(pos))) if len(pos) > 0 else 0.0
 
 
 def _power_iteration_ppr(
@@ -104,6 +111,7 @@ class PPRRetriever:
 
         # Entity seeds: rank entities by cosine similarity with query, weighted by inverse degree
         e_indices = graph.entity_indices
+        seed_entity_nodes: list[int] = []
         if e_indices:
             e_embeds = graph.node_embeddings[e_indices]
             e_scores = np.dot(e_embeds, query_vec)
@@ -113,6 +121,7 @@ class PPRRetriever:
                 sc = float(e_scores[rel_idx])
                 if sc > 0:
                     global_idx = e_indices[rel_idx]
+                    seed_entity_nodes.append(global_idx)
                     d = max(deg[global_idx], 1.0)
                     # Degree penalty (inverse log degree)
                     p0[global_idx] = sc / np.log1p(d)
@@ -171,13 +180,17 @@ class PPRRetriever:
         sub_adj = adj[subgraph_nodes, :][:, subgraph_nodes].tocoo()
         edge_index = np.stack([sub_adj.row, sub_adj.col], axis=0)
 
-        # Directional Distance Encoding (BFS from seed entities to nodes in subgraph)
+        # Directional Distance Encoding (BFS strictly from query seed entities to nodes in subgraph)
         dde = np.full(n_sub, fill_value=4, dtype=np.int32)
         adj_list: dict[int, list[int]] = {i: [] for i in range(n_sub)}
         for u, v in zip(sub_adj.row, sub_adj.col):
             adj_list[u].append(v)
 
-        sub_seeds = [node_map[s] for s in seed_nodes if s in node_map]
+        sub_seeds = [node_map[s] for s in seed_entity_nodes if s in node_map]
+        if not sub_seeds:
+            # Fallback to general seed nodes if no entities qualified as seeds
+            sub_seeds = [node_map[s] for s in seed_nodes if s in node_map]
+
         queue = deque([(s, 0) for s in sub_seeds])
         visited = set(sub_seeds)
         for s in sub_seeds:
@@ -192,16 +205,31 @@ class PPRRetriever:
                     dde[neighbor] = new_dist
                     queue.append((neighbor, new_dist))
 
-        # Node Features (Domain-Agnostic): D < 32
+        # Node Features (Domain-Agnostic): D < 32 (ADR-0003)
         sub_embeds = graph.node_embeddings[subgraph_nodes]
         query_sim = np.dot(sub_embeds, query_vec).reshape(-1, 1)
 
         sub_p_shallow = p_shallow[subgraph_nodes].reshape(-1, 1)
         sub_p_deep = p_deep[subgraph_nodes].reshape(-1, 1)
         sub_drift = p_drift[subgraph_nodes].reshape(-1, 1)
+        entropy_drift = _shannon_entropy(p_deep) - _shannon_entropy(p_shallow)
 
         sub_deg = np.log1p(np.array(sub_adj.sum(axis=1))).reshape(-1, 1)
         global_deg = np.log1p(np.array(adj[subgraph_nodes, :].sum(axis=1))).reshape(-1, 1)
+
+        # Corpus IDF feature per node (ADR-0003)
+        total_p = len(graph.passage_indices)
+        node_idfs: list[float] = []
+        for orig in subgraph_nodes:
+            if orig in graph.passage_indices:
+                node_idfs.append(1.0)
+            elif orig in graph.sentence_indices:
+                node_idfs.append(1.0)
+            else:
+                e_idx = orig - len(graph.passage_indices) - len(graph.sentence_indices)
+                df = len(graph.entity_to_passages.get(e_idx, []))
+                node_idfs.append(float(np.log1p((total_p + 1.0) / (df + 1.0))))
+        node_idf_feat = np.array(node_idfs, dtype=np.float32).reshape(-1, 1)
 
         dde_feat = (dde / 4.0).reshape(-1, 1)
 
@@ -227,6 +255,7 @@ class PPRRetriever:
                 sub_drift,
                 sub_deg,
                 global_deg,
+                node_idf_feat,
                 dde_feat,
                 is_flat,
                 is_p,
@@ -253,6 +282,7 @@ class PPRRetriever:
             ppr_shallow=sub_p_shallow.flatten(),
             ppr_deep=sub_p_deep.flatten(),
             ppr_drift=sub_drift.flatten(),
+            ppr_entropy_drift=entropy_drift,
             directional_distance_encoding=dde,
             node_labels=node_labels,
         )
