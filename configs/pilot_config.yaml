@@ -1,0 +1,67 @@
+seed: 42
+artifacts_dir: "/content/artifacts"
+
+datasets:
+  longmemeval_s:
+    hf_repo: "xiaowu0162/longmemeval-cleaned"
+    max_queries: 500
+    eval_persistent_contamination: true
+    persistent_subset_size: 150
+  musique:
+    hf_repo: "dgslibisey/MuSiQue"
+    split: "validation"
+    max_queries: 250
+  hotpotqa:
+    hf_repo: "hotpotqa/hotpot_qa"
+    config: "distractor"
+    split: "validation"
+    max_queries: 250
+
+embedding:
+  model_name: "BAAI/bge-large-en-v1.5"
+  batch_size: 128
+  normalize_embeddings: true
+  dtype: "float16"
+
+trigraph:
+  spacy_model: "en_core_web_sm"
+  synonym_sim_threshold: 0.85
+  max_synonym_neighbors: 5
+  seed_entities_top_s: 5
+  seed_passages_top_sp: 3
+  ppr_alpha: 0.15
+  ppr_shallow_steps: 2
+  ppr_deep_steps: 10
+  dense_ppr_mix_weight: 0.35
+  retrieval_top_k: 5
+  subgraph_max_entities: 30
+  subgraph_max_passages: 15
+
+oracle_llm:
+  model_name: "Qwen/Qwen2.5-7B-Instruct"
+  max_model_len: 8192
+  max_new_tokens: 96
+  temperature: 0.0
+  gpu_memory_utilization: 0.85
+
+qpp_models:
+  cv_folds: 5
+  gnn:
+    arch: "gatv2"          # "gatv2" | "rgcn"
+    hidden_dim: 64
+    num_layers: 2
+    dropout: 0.15
+    lr: 0.002
+    weight_decay: 0.0001
+    epochs: 80
+    batch_size: 32
+    huber_delta: 0.1
+    bce_weight: 0.4
+    rank_margin_weight: 0.3
+  lightgbm:
+    n_estimators: 200
+    learning_rate: 0.04
+    num_leaves: 15
+    min_child_samples: 15
+    subsample: 0.8
+    colsample_bytree: 0.8

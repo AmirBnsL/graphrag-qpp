@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "graphrag-qpp"
+version = "0.1.0"
+description = "Query Performance Prediction (QPP) and Subgraph Topological Routing for GraphRAG and Conversational Agent Memory"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.3.0",
+    "torch-geometric>=2.5.0",
+    "sentence-transformers>=3.0.0",
+    "spacy>=3.7.0",
+    "scipy>=1.13.0",
+    "networkx>=3.3",
+    "numpy>=1.26.0",
+    "pandas>=2.2.0",
+    "pyarrow>=16.0.0",
+    "datasets>=2.20.0",
+    "lightgbm>=4.3.0",
+    "scikit-learn>=1.5.0",
+    "pyyaml>=6.0.1",
+    "matplotlib>=3.9.0",
+    "seaborn>=0.13.2",
+    "tqdm>=4.66.0",
+]
+
+[project.optional-dependencies]
+oracle = [
+    "vllm>=0.6.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true
+explicit_package_bases = true
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.1",
+    "pytest>=9.2.0",
+]
