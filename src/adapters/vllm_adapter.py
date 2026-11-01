@@ -116,8 +116,10 @@ class QuantizedVLLMGeneratorJudge(BaseOracleGeneratorJudge):
         judge_model: str = "google/gemma-4-12B-it",
         generator_quantization: str = "awq",
         judge_quantization: str = "awq",
-        gpu_memory_utilization: float = 0.50,
+        gpu_memory_utilization: float = 0.70,
+        judge_gpu_memory_utilization: float = 0.80,
         max_model_len: int = 8192,
+        judge_max_model_len: int = 4096,
         seed: int = 42,
     ) -> None:
         self.generator_model = generator_model
@@ -125,7 +127,9 @@ class QuantizedVLLMGeneratorJudge(BaseOracleGeneratorJudge):
         self.generator_quantization = generator_quantization
         self.judge_quantization = judge_quantization
         self.gpu_memory_utilization = gpu_memory_utilization
+        self.judge_gpu_memory_utilization = judge_gpu_memory_utilization
         self.max_model_len = max_model_len
+        self.judge_max_model_len = judge_max_model_len
         self.seed = seed
 
         self._generator_llm: Any = None
@@ -147,21 +151,28 @@ class QuantizedVLLMGeneratorJudge(BaseOracleGeneratorJudge):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    def _load_llm(self, model_name: str, quantization: str | None) -> Any:
+    def _load_llm(
+        self,
+        model_name: str,
+        quantization: str | None,
+        mem_util: float,
+        model_len: int,
+    ) -> Any:
         """Unified helper to instantiate a quantized vLLM model with context-safe VRAM budgeting."""
         self._unload_active_model()
         from vllm import LLM
 
         logger.info(
-            "Loading quantized LLM '%s' (quant=%s, mem_util=%.2f)",
+            "Loading quantized LLM '%s' (quant=%s, mem_util=%.2f, max_model_len=%d)",
             model_name,
             quantization,
-            self.gpu_memory_utilization,
+            mem_util,
+            model_len,
         )
         kwargs: dict[str, Any] = {
             "model": model_name,
-            "gpu_memory_utilization": self.gpu_memory_utilization,
-            "max_model_len": self.max_model_len,
+            "gpu_memory_utilization": mem_util,
+            "max_model_len": model_len,
             "seed": self.seed,
             "trust_remote_code": True,
         }
@@ -172,12 +183,22 @@ class QuantizedVLLMGeneratorJudge(BaseOracleGeneratorJudge):
 
     def _get_generator_llm(self) -> Any:
         if self._generator_llm is None:
-            self._generator_llm = self._load_llm(self.generator_model, self.generator_quantization)
+            self._generator_llm = self._load_llm(
+                self.generator_model,
+                self.generator_quantization,
+                mem_util=self.gpu_memory_utilization,
+                model_len=self.max_model_len,
+            )
         return self._generator_llm
 
     def _get_judge_llm(self) -> Any:
         if self._judge_llm is None:
-            self._judge_llm = self._load_llm(self.judge_model, self.judge_quantization)
+            self._judge_llm = self._load_llm(
+                self.judge_model,
+                self.judge_quantization,
+                mem_util=self.judge_gpu_memory_utilization,
+                model_len=self.judge_max_model_len,
+            )
         return self._judge_llm
 
     def generate(self, query: str, passages: list[dict[str, Any]]) -> str:

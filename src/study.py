@@ -496,6 +496,10 @@ class ContextSelectionStudy:
                 for i, item in enumerate(intermediate)
             ]
 
+        # Step C.1: Clean up judge GPU memory before selector training
+        if hasattr(self.oracle_judge, "cleanup"):
+            self.oracle_judge.cleanup()
+
         # Step D: Assemble QueryResult objects
         for i, item in enumerate(intermediate):
             sample = item["sample"]
