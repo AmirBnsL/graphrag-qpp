@@ -14,7 +14,6 @@ class BaseEmbedder(ABC):
     @abstractmethod
     def embed_texts(self, texts: list[str]) -> np.ndarray:
         """Compute normalized dense embeddings for a list of texts."""
-        pass
 
 
 class BaseOracleGeneratorJudge(ABC):
@@ -23,7 +22,6 @@ class BaseOracleGeneratorJudge(ABC):
     @abstractmethod
     def generate(self, query: str, passages: list[dict[str, Any]]) -> str:
         """Generate RAG response given query and retrieved passage chunks."""
-        pass
 
     @abstractmethod
     def judge(
@@ -34,4 +32,3 @@ class BaseOracleGeneratorJudge(ABC):
         gold_answers: list[str],
     ) -> tuple[float, float, float]:
         """Judge Flat vs Graph answers on {0, 0.5, 1.0} rubric and pairwise preference margin."""
-        pass

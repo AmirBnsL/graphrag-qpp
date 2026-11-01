@@ -11,8 +11,14 @@ import numpy as np
 
 from src.adapters.base import BaseEmbedder, BaseOracleGeneratorJudge
 from src.data.loader import QuerySample
+from src.eval.retrieval_metrics import (
+    compute_access_gini,
+    compute_ppr_entropy,
+    compute_precision_at_k,
+    compute_recall_at_k,
+)
 from src.graph.ppr_retriever import CandidateSubgraphData, PPRRetriever
-from src.graph.trigraph_builder import TriGraphBuilder
+from src.graph.trigraph_builder import CleanupStage, TriGraphBuilder
 from src.qpp.classical import compute_classical_qpp
 
 
@@ -47,6 +53,7 @@ class StudyConfig:
     ppr_alpha: float = 0.15
     ppr_shallow_steps: int = 2
     ppr_deep_steps: int = 10
+    cleanup_stage: CleanupStage = CleanupStage.RAW_PERSISTENT
     gain_margin_thresholds: list[float] = field(
         default_factory=lambda: [0.0, 0.05, 0.10, 0.15, 0.20]
     )
@@ -170,8 +177,8 @@ class ContextSelectionStudy:
             # 1. Embed query
             q_vec = self.embedder.embed_texts([sample.question])[0]
 
-            # 2. Build Tri-Graph from corpus passages
-            trigraph = self.builder.build(sample.corpus_passages)
+            # 2. Build Tri-Graph from corpus passages under configured cleanup stage
+            trigraph = self.builder.build(sample.corpus_passages, stage=self.config.cleanup_stage)
 
             # 3. Flat Dense retrieval (strict top-k passage budget parity)
             flat_top = self.retriever.retrieve_flat(
@@ -256,3 +263,114 @@ def run_qpp_study(
     """Convenience functional wrapper around ContextSelectionStudy."""
     study = ContextSelectionStudy(config=config, embedder=embedder, oracle_judge=oracle_judge)
     return study.run(samples)
+
+
+@dataclass
+class StageResult:
+    """Consolidated retrieval metrics for a Tri-Graph cleanup stage."""
+
+    stage: CleanupStage
+    mean_precision: float
+    mean_recall: float
+    mean_access_gini: float
+    mean_ppr_entropy: float
+    per_query_results: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class CleanupAblationReport:
+    """Report comparing retrieval metrics across the 4-stage Tri-Graph cleanup hierarchy."""
+
+    stage_results: dict[CleanupStage, StageResult]
+    config: StudyConfig
+
+
+def evaluate_cleanup_ablation(
+    samples: list[QuerySample],
+    config: StudyConfig,
+    embedder: BaseEmbedder,
+) -> CleanupAblationReport:
+    """Evaluate 4-stage cleanup ablation on retrieval metrics without LLM calls (ADR-0005, Issue #3).
+
+    Evaluates:
+      Stage 0 (RAW_PERSISTENT): Unconstrained persistent graph, uniform weights.
+      Stage 1 (LEXICAL_NORMALIZATION): POS filter, lemmatization, conversational stop-list.
+      Stage 2 (IDF_DEGREE_DAMPENING): Corpus IDF edge weighting + degree-penalized PPR.
+      Stage 3 (SESSION_CONTEXT_CONSTRAINED): Cross-session context-similarity edge gating.
+    """
+    builder = TriGraphBuilder(embedder=embedder)
+    retriever = PPRRetriever(
+        alpha=config.ppr_alpha,
+        shallow_steps=config.ppr_shallow_steps,
+        deep_steps=config.ppr_deep_steps,
+    )
+
+    stage_results: dict[CleanupStage, StageResult] = {}
+
+    for stage in [
+        CleanupStage.RAW_PERSISTENT,
+        CleanupStage.LEXICAL_NORMALIZATION,
+        CleanupStage.IDF_DEGREE_DAMPENING,
+        CleanupStage.SESSION_CONTEXT_CONSTRAINED,
+    ]:
+        precisions: list[float] = []
+        recalls: list[float] = []
+        ginis: list[float] = []
+        entropies: list[float] = []
+        per_query: list[dict[str, Any]] = []
+
+        for sample in samples:
+            q_vec = embedder.embed_texts([sample.question])[0]
+            graph = builder.build(sample.corpus_passages, stage=stage)
+
+            flat_passages = retriever.retrieve_flat(
+                query_vec=q_vec,
+                graph=graph,
+                top_k=config.retrieval_top_k,
+            )
+
+            graph_passages, cand_subgraph = retriever.retrieve_graph(
+                query_vec=q_vec,
+                graph=graph,
+                flat_top_passages=flat_passages,
+                top_k=config.retrieval_top_k,
+            )
+
+            retrieved_ids = [p.get("passage_id", "") for p in graph_passages]
+            gold_ids = sample.gold_evidence_ids
+
+            prec = compute_precision_at_k(retrieved_ids, gold_ids, k=config.retrieval_top_k)
+            rec = compute_recall_at_k(retrieved_ids, gold_ids, k=config.retrieval_top_k)
+            # Hub Access Gini: Gini coefficient measuring access concentration across active candidate nodes (Song & Cai, 2026)
+            gini = compute_access_gini(cand_subgraph.ppr_deep, only_positive=True)
+            ent = compute_ppr_entropy(cand_subgraph.ppr_deep)
+
+            precisions.append(prec)
+            recalls.append(rec)
+            ginis.append(gini)
+            entropies.append(ent)
+
+            per_query.append(
+                {
+                    "query_id": sample.query_id,
+                    "precision": prec,
+                    "recall": rec,
+                    "access_gini": gini,
+                    "ppr_entropy": ent,
+                    "retrieved_ids": retrieved_ids,
+                }
+            )
+
+        stage_results[stage] = StageResult(
+            stage=stage,
+            mean_precision=float(np.mean(precisions)) if precisions else 0.0,
+            mean_recall=float(np.mean(recalls)) if recalls else 0.0,
+            mean_access_gini=float(np.mean(ginis)) if ginis else 0.0,
+            mean_ppr_entropy=float(np.mean(entropies)) if entropies else 0.0,
+            per_query_results=per_query,
+        )
+
+    return CleanupAblationReport(
+        stage_results=stage_results,
+        config=config,
+    )
