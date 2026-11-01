@@ -20,6 +20,8 @@ from src.eval.retrieval_metrics import (
 from src.graph.ppr_retriever import CandidateSubgraphData, PPRRetriever
 from src.graph.trigraph_builder import CleanupStage, TriGraphBuilder
 from src.qpp.classical import compute_classical_qpp
+from src.qpp.tabular_router import TabularCVResult, evaluate_in_domain_cv
+from src.qpp.topological_features import extract_topological_features
 
 
 def format_prompt(query: str, passages: list[dict[str, Any]]) -> str:
@@ -148,6 +150,50 @@ class StudyReport:
             "graph_selected_count": graph_selected,
             "mean_achieved_gain": float(np.mean(achieved_gains)) if achieved_gains else 0.0,
         }
+
+    def extract_topological_features(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+        """Extract handcrafted topological feature matrix and targets from all query results."""
+        feature_list: list[list[float]] = []
+        lexical_gains: list[float] = []
+        semantic_gains: list[float] = []
+        feature_names: list[str] = []
+
+        for res in self.query_results.values():
+            feats = extract_topological_features(
+                candidate_subgraph=res.candidate_subgraph,
+                flat_passages=res.flat_passages,
+                graph_passages=res.graph_passages,
+            )
+            if not feature_names:
+                feature_names = list(feats.keys())
+            feature_list.append([feats[k] for k in feature_names])
+            lexical_gains.append(res.lexical_gain)
+            semantic_gains.append(res.semantic_gain)
+
+        X = np.array(feature_list, dtype=np.float32) if feature_list else np.empty((0, 15), dtype=np.float32)
+        y_lex = np.array(lexical_gains, dtype=np.float32)
+        y_sem = np.array(semantic_gains, dtype=np.float32)
+        return X, y_lex, y_sem, feature_names
+
+    def evaluate_topological_lightgbm(
+        self,
+        target: str = "semantic",
+        n_splits: int = 5,
+        tau_sweep: list[float] | None = None,
+        random_state: int = 42,
+    ) -> TabularCVResult:
+        """Train and cross-validate Topological LightGBM Post-Retrieval Context Selector."""
+        X, y_lex, y_sem, names = self.extract_topological_features()
+        y = y_sem if target == "semantic" else y_lex
+        sweep = tau_sweep or self.config.gain_margin_thresholds
+        return evaluate_in_domain_cv(
+            X=X,
+            y=y,
+            n_splits=n_splits,
+            tau_sweep=sweep,
+            random_state=random_state,
+            router_kwargs={"feature_names": names, "random_state": random_state},
+        )
 
 
 class ContextSelectionStudy:
