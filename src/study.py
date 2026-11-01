@@ -456,6 +456,10 @@ class ContextSelectionStudy:
                 "cqpp": cqpp,
             })
 
+        # Free embedder GPU VRAM before loading the generator LLM
+        if hasattr(self.embedder, "unload"):
+            self.embedder.unload()
+
         # Step B: Generator stage (No-RAG, Flat-RAG, Graph-RAG under Passage-Budget Parity)
         if hasattr(self.oracle_judge, "generate_batch"):
             pairs_to_generate: list[tuple[str, list[dict[str, Any]]]] = []

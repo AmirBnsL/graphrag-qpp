@@ -17,6 +17,7 @@ from src.adapters.base import BaseOracleGeneratorJudge
 # Prevent headless Colab from blocking on web UI secrets vault
 os.environ.setdefault("HF_HUB_DISABLE_COLAB_SECRETS", "1")
 os.environ.setdefault("VERTEX_PRODUCT", "COLAB_ENTERPRISE")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 logger = logging.getLogger(__name__)
 
