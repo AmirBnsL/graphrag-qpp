@@ -8,6 +8,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+from scipy.stats import spearmanr
+
 from src.adapters.base import BaseEmbedder, BaseOracleGeneratorJudge
 from src.adapters.fake import FakeEmbedder, FakeOracleGeneratorJudge
 from src.adapters.qwen_embedder import QwenEmbedder
@@ -33,11 +36,16 @@ from src.eval.reporting import (
     export_zero_shot_transfer_table_latex,
 )
 from src.graph.trigraph_builder import CleanupStage
-from src.study import StudyConfig, StudyReport, run_qpp_study
+from src.study import (
+    CleanupAblationReport,
+    StudyConfig,
+    StudyReport,
+    evaluate_cleanup_ablation,
+    run_qpp_study,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("run_benchmarks")
-
 
 CLEANUP_STAGE_MAP = {
     "0": CleanupStage.RAW_PERSISTENT,
@@ -98,8 +106,10 @@ def setup_adapters(mode: str) -> tuple[BaseEmbedder, BaseOracleGeneratorJudge]:
         logger.info("Initializing GPU production adapters (Qwen3-Embedding & Quantized vLLM)...")
         embedder: BaseEmbedder = QwenEmbedder(model_name="Qwen/Qwen3-Embedding-0.6B")
         oracle_judge: BaseOracleGeneratorJudge = QuantizedVLLMGeneratorJudge(
-            generator_model="Qwen/Qwen2.5-7B-Instruct-AWQ",
-            judge_model="google/gemma-2-9b-it",
+            generator_model="Qwen/Qwen3.5-9B-AWQ",
+            judge_model="google/gemma-4-12B-it",
+            generator_quantization="awq",
+            judge_quantization="awq",
             gpu_memory_utilization=0.40,
         )
         return embedder, oracle_judge
@@ -113,7 +123,7 @@ def run_benchmark_pipeline(
     max_queries_lme: int = 500,
     max_queries_multihop: int = 500,
     output_dir: str | Path = "artifacts/benchmark_run",
-    cleanup_stage_str: str = "stage_3_context_filtered",
+    cleanup_stage_str: str = "context_filtered",
     tau_sweep: list[float] | None = None,
 ) -> dict[str, Any]:
     """Run full benchmark pipeline, caching artifacts and exporting tables/figures."""
@@ -156,9 +166,7 @@ def run_benchmark_pipeline(
         except Exception as e:
             logger.warning("Could not load full Multi-Hop benchmarks (%s). Using fallback slice.", e)
     else:
-        # In mock mode, construct synthetic representative samples if network download is skipped
-        from tests.test_gatv2_router import _create_mock_candidate_subgraph
-
+        # In mock mode, construct representative synthetic samples
         passages_hotpot = [
             {"passage_id": f"hp_{i}", "text": f"FluxQubit quantum coherence passage {i}.", "sentences": [f"FluxQubit quantum coherence passage {i}."]}
             for i in range(10)
@@ -210,9 +218,19 @@ def run_benchmark_pipeline(
     lightgbm_dual = report.evaluate_dual_routers(n_splits=n_splits, tau_sweep=tau_sweep)
     gnn_dual = report.evaluate_dual_gnn_routers(n_splits=n_splits, tau_sweep=tau_sweep, epochs=15)
 
-    # Zero-Shot Topological Transfer between Multi-Hop QA and Conversational Memory
-    report_mh = run_qpp_study(mh_samples, config=config, embedder=embedder, oracle_judge=oracle_judge)
-    report_lme = run_qpp_study(lme_samples, config=config, embedder=embedder, oracle_judge=oracle_judge)
+    # Zero-Shot Topological Transfer without redundant study re-execution
+    mh_qids = {s.query_id for s in mh_samples}
+    lme_qids = {s.query_id for s in lme_samples}
+    report_mh = StudyReport(
+        query_results={qid: res for qid, res in report.query_results.items() if qid in mh_qids},
+        classical_qpp_results=report.classical_qpp_results,
+        config=config,
+    )
+    report_lme = StudyReport(
+        query_results={qid: res for qid, res in report.query_results.items() if qid in lme_qids},
+        classical_qpp_results=report.classical_qpp_results,
+        config=config,
+    )
 
     zs_transfer = report_mh.evaluate_gnn_zero_shot_transfer(
         target_report=report_lme,
@@ -223,33 +241,61 @@ def run_benchmark_pipeline(
 
     # 5. Export LaTeX Tables
     logger.info("Exporting publication LaTeX tables...")
-    correlation_metrics: dict[str, dict[str, Any]] = {
-        "Avg-IDF": {"type": "Classical Pre", "spearman_rho": 0.04, "spearman_pvalue": 0.42, "mse": 0.12, "mae": 0.28},
-        "NQC": {"type": "Classical Post", "spearman_rho": -0.06, "spearman_pvalue": 0.31, "mse": 0.14, "mae": 0.30},
-        "WIG": {"type": "Classical Post", "spearman_rho": 0.02, "spearman_pvalue": 0.65, "mse": 0.13, "mae": 0.29},
-        "Topological LightGBM": {
-            "type": "Tabular Topo",
-            "spearman_rho": lightgbm_dual["semantic_cv"].spearman_rho,
-            "spearman_pvalue": lightgbm_dual["semantic_cv"].spearman_pvalue,
-            "mse": lightgbm_dual["semantic_cv"].mse,
-            "mae": lightgbm_dual["semantic_cv"].mae,
-        },
-        "GATv2 GNN Context Selector": {
-            "type": "GNN Topo",
-            "spearman_rho": gnn_dual["semantic_cv"].spearman_rho,
-            "spearman_pvalue": gnn_dual["semantic_cv"].spearman_pvalue,
-            "mse": gnn_dual["semantic_cv"].mse,
-            "mae": gnn_dual["semantic_cv"].mae,
-        },
+    y_sem = np.array([r.semantic_gain for r in report.query_results.values()], dtype=np.float32)
+    classical_names = ["nqc", "wig", "avg_idf", "max_idf", "scq", "query_length"]
+    correlation_metrics: dict[str, dict[str, Any]] = {}
+
+    for qpp_name in classical_names:
+        scores = np.array([r.classical_qpp.get(qpp_name, 0.0) for r in report.query_results.values()], dtype=np.float32)
+        if len(scores) > 1 and np.std(scores) > 1e-9 and np.std(y_sem) > 1e-9:
+            res_corr = spearmanr(scores, y_sem)
+            rho_val = float(res_corr.statistic)
+            p_val = float(res_corr.pvalue)
+        else:
+            rho_val, p_val = 0.0, 1.0
+
+        is_pre = "idf" in qpp_name or "scq" in qpp_name or "length" in qpp_name
+        correlation_metrics[qpp_name.upper()] = {
+            "type": "Classical Pre" if is_pre else "Classical Post",
+            "spearman_rho": rho_val,
+            "spearman_pvalue": p_val,
+            "mse": float(np.mean((scores - y_sem) ** 2)),
+            "mae": float(np.mean(np.abs(scores - y_sem))),
+        }
+
+    correlation_metrics["Topological LightGBM"] = {
+        "type": "Tabular Topo",
+        "spearman_rho": lightgbm_dual["semantic_cv"].spearman_rho,
+        "spearman_pvalue": lightgbm_dual["semantic_cv"].spearman_pvalue,
+        "mse": lightgbm_dual["semantic_cv"].mse,
+        "mae": lightgbm_dual["semantic_cv"].mae,
     }
+    correlation_metrics["GATv2 GNN Context Selector"] = {
+        "type": "GNN Topo",
+        "spearman_rho": gnn_dual["semantic_cv"].spearman_rho,
+        "spearman_pvalue": gnn_dual["semantic_cv"].spearman_pvalue,
+        "mse": gnn_dual["semantic_cv"].mse,
+        "mae": gnn_dual["semantic_cv"].mae,
+    }
+
     export_qpp_correlation_table_latex(correlation_metrics, tables_dir / "qpp_correlations.tex")
     export_conservative_abstention_table_latex(gnn_dual["semantic_cv"].tau_sweep_results, tables_dir / "conservative_abstention.tex")
 
+    # Run real 4-stage cleanup ablation without calling LLM
+    ablation_report: CleanupAblationReport = evaluate_cleanup_ablation(
+        samples=samples[:min(len(samples), 10)],
+        config=config,
+        embedder=embedder,
+    )
     ablation_data = [
-        {"stage": "Step 0 (Raw)", "hub_access_gini": 0.812, "precision_at_5": 0.310, "recall_at_5": 0.450, "ppr_entropy": 3.85},
-        {"stage": "Step 1 (POS/Stoplist)", "hub_access_gini": 0.640, "precision_at_5": 0.420, "recall_at_5": 0.520, "ppr_entropy": 3.20},
-        {"stage": "Step 2 (IDF Weighting)", "hub_access_gini": 0.480, "precision_at_5": 0.510, "recall_at_5": 0.590, "ppr_entropy": 2.75},
-        {"stage": "Step 3 (Context Filtered)", "hub_access_gini": 0.320, "precision_at_5": 0.620, "recall_at_5": 0.680, "ppr_entropy": 2.15},
+        {
+            "stage": f"Step {int(st)} ({st.name})",
+            "hub_access_gini": res.mean_access_gini,
+            "precision_at_5": res.mean_precision,
+            "recall_at_5": res.mean_recall,
+            "ppr_entropy": res.mean_ppr_entropy,
+        }
+        for st, res in ablation_report.stage_results.items()
     ]
     export_hub_cleanup_ablation_table_latex(ablation_data, tables_dir / "hub_cleanup_ablation.tex")
     export_router_disagreement_table_latex(gnn_dual["disagreement_sweep"], tables_dir / "router_disagreement.tex")
@@ -294,6 +340,7 @@ def run_benchmark_pipeline(
         "lightgbm_dual": lightgbm_dual,
         "gnn_dual": gnn_dual,
         "zs_transfer": zs_transfer,
+        "ablation_report": ablation_report,
     }
 
 

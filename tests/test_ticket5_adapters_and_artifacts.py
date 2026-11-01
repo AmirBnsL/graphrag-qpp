@@ -15,7 +15,9 @@ from src.adapters.vllm_adapter import (
     QuantizedVLLMGeneratorJudge,
     build_generator_prompt,
     build_judge_prompt,
+    build_pairwise_preference_prompt,
     parse_judge_score,
+    parse_pairwise_preference,
 )
 from src.data.caching import (
     export_study_summary_json,
@@ -70,15 +72,29 @@ def test_vllm_prompt_builders_and_score_parsers():
     assert parse_judge_score("Overall, 1.0 is given.") == 1.0
     assert parse_judge_score("Completely wrong answer.") == 0.0
 
+    # 4. Pairwise preference prompt and parser (ADR-0002)
+    pair_prompt = build_pairwise_preference_prompt(query, "Ans A", "Ans B", ["Gold"])
+    assert "Candidate Answer A:" in pair_prompt
+    assert "Candidate Answer B:" in pair_prompt
+    assert "Preference: <A, B, or Tie>" in pair_prompt
+    assert parse_pairwise_preference("Evaluation: Preference: B") == "B"
+    assert parse_pairwise_preference("Preference: A") == "A"
+    assert parse_pairwise_preference("Preference: Tie") == "Tie"
+
 
 def test_quantized_vllm_generator_judge_lifecycle():
     """Verify VRAM budgeting and sequential lifecycle unloading in QuantizedVLLMGeneratorJudge (ADR-0004)."""
     adapter = QuantizedVLLMGeneratorJudge(
-        generator_model="Qwen/Qwen2.5-7B-Instruct-AWQ",
-        judge_model="google/gemma-2-9b-it",
+        generator_model="Qwen/Qwen3.5-9B-AWQ",
+        judge_model="google/gemma-4-12B-it",
+        generator_quantization="awq",
+        judge_quantization="awq",
         gpu_memory_utilization=0.40,
         max_model_len=4096,
     )
+    # Both generator and judge must be quantized (ADR-0004)
+    assert adapter.generator_quantization == "awq"
+    assert adapter.judge_quantization == "awq"
     # Weights must consume < 10GB (< 45% of 24GB VRAM)
     assert adapter.gpu_memory_utilization <= 0.45
     assert adapter._generator_llm is None
@@ -93,6 +109,8 @@ def test_quantized_vllm_generator_judge_lifecycle():
 
 def test_parquet_and_pt_artifact_caching_roundtrip(tmp_path: Path):
     """Verify Parquet tabular results and PyTorch .pt Candidate Subgraph caching round-trip."""
+    import torch
+
     embedder = FakeEmbedder()
     oracle_judge = FakeOracleGeneratorJudge()
     config = StudyConfig(retrieval_top_k=2)
@@ -127,6 +145,14 @@ def test_parquet_and_pt_artifact_caching_roundtrip(tmp_path: Path):
     assert "semantic_gain" in df.columns
     assert "lexical_gain" in df.columns
     assert "ppr_entropy_drift" in df.columns
+    assert "no_rag_answer" in df.columns
+    assert "flat_passages_json" in df.columns
+    assert "graph_passages_json" in df.columns
+
+    raw_pt = torch.load(pt_path, weights_only=False)
+    assert "subgraphs" in raw_pt
+    assert "retrieval_outputs" in raw_pt
+    assert len(raw_pt["retrieval_outputs"]) == 3
 
     for qid in ["q_1", "q_2", "q_3"]:
         assert qid in subgraphs

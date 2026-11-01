@@ -47,6 +47,28 @@ def build_judge_prompt(
     )
 
 
+def build_pairwise_preference_prompt(
+    query: str,
+    flat_answer: str,
+    graph_answer: str,
+    gold_answers: list[str],
+) -> str:
+    """Format pairwise preference prompt comparing Flat vs Graph RAG answers (ADR-0002)."""
+    gold_str = " | ".join(gold_answers)
+    return (
+        f"You are an impartial evaluator comparing two candidate answers for a RAG benchmark.\n\n"
+        f"Question: {query}\n"
+        f"Reference ground-truth: {gold_str}\n\n"
+        f"Candidate Answer A:\n{flat_answer}\n\n"
+        f"Candidate Answer B:\n{graph_answer}\n\n"
+        f"Which answer is better based on correctness, completeness, and alignment with reference?\n"
+        f"- Reply 'Preference: A' if Candidate A is superior.\n"
+        f"- Reply 'Preference: B' if Candidate B is superior.\n"
+        f"- Reply 'Preference: Tie' if both are equally good or equally poor.\n\n"
+        f"Format: Preference: <A, B, or Tie>"
+    )
+
+
 def parse_judge_score(response_text: str) -> float:
     """Extract numeric score {0.0, 0.5, 1.0} from judge LLM response text."""
     match = re.search(r"Score:\s*([01](?:\.[05])?)", response_text, re.IGNORECASE)
@@ -61,15 +83,27 @@ def parse_judge_score(response_text: str) -> float:
     return 0.0
 
 
+def parse_pairwise_preference(response_text: str) -> str:
+    """Extract preference choice ('A', 'B', or 'Tie') from pairwise judge LLM output."""
+    match = re.search(r"Preference:\s*(A|B|Tie)", response_text, re.IGNORECASE)
+    if match:
+        return match.group(1).capitalize()
+    if "candidate b" in response_text.lower():
+        return "B"
+    if "candidate a" in response_text.lower():
+        return "A"
+    return "Tie"
+
+
 class QuantizedVLLMGeneratorJudge(BaseOracleGeneratorJudge):
     """Production sequential quantized generator and cross-family judge via vLLM (ADR-0004)."""
 
     def __init__(
         self,
-        generator_model: str = "Qwen/Qwen2.5-7B-Instruct-AWQ",
-        judge_model: str = "google/gemma-2-9b-it",
+        generator_model: str = "Qwen/Qwen3.5-9B-AWQ",
+        judge_model: str = "google/gemma-4-12B-it",
         generator_quantization: str = "awq",
-        judge_quantization: str | None = None,
+        judge_quantization: str = "awq",
         gpu_memory_utilization: float = 0.40,
         max_model_len: int = 4096,
         seed: int = 42,
@@ -101,54 +135,37 @@ class QuantizedVLLMGeneratorJudge(BaseOracleGeneratorJudge):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    def _load_llm(self, model_name: str, quantization: str | None) -> Any:
+        """Unified helper to instantiate a quantized vLLM model with context-safe VRAM budgeting."""
+        self._unload_active_model()
+        from vllm import LLM
+
+        logger.info(
+            "Loading quantized LLM '%s' (quant=%s, mem_util=%.2f)",
+            model_name,
+            quantization,
+            self.gpu_memory_utilization,
+        )
+        kwargs: dict[str, Any] = {
+            "model": model_name,
+            "gpu_memory_utilization": self.gpu_memory_utilization,
+            "max_model_len": self.max_model_len,
+            "seed": self.seed,
+            "trust_remote_code": True,
+        }
+        if quantization:
+            kwargs["quantization"] = quantization
+
+        return LLM(**kwargs)
+
     def _get_generator_llm(self) -> Any:
         if self._generator_llm is None:
-            # Enforce single model in VRAM at a time (ADR-0004)
-            self._unload_active_model()
-            from vllm import LLM
-
-            logger.info(
-                "Loading quantized generator '%s' (quant=%s, mem_util=%.2f)",
-                self.generator_model,
-                self.generator_quantization,
-                self.gpu_memory_utilization,
-            )
-            kwargs: dict[str, Any] = {
-                "model": self.generator_model,
-                "gpu_memory_utilization": self.gpu_memory_utilization,
-                "max_model_len": self.max_model_len,
-                "seed": self.seed,
-                "trust_remote_code": True,
-            }
-            if self.generator_quantization:
-                kwargs["quantization"] = self.generator_quantization
-
-            self._generator_llm = LLM(**kwargs)
+            self._generator_llm = self._load_llm(self.generator_model, self.generator_quantization)
         return self._generator_llm
 
     def _get_judge_llm(self) -> Any:
         if self._judge_llm is None:
-            # Enforce single model in VRAM at a time (ADR-0004)
-            self._unload_active_model()
-            from vllm import LLM
-
-            logger.info(
-                "Loading quantized judge '%s' (quant=%s, mem_util=%.2f)",
-                self.judge_model,
-                self.judge_quantization,
-                self.gpu_memory_utilization,
-            )
-            kwargs: dict[str, Any] = {
-                "model": self.judge_model,
-                "gpu_memory_utilization": self.gpu_memory_utilization,
-                "max_model_len": self.max_model_len,
-                "seed": self.seed,
-                "trust_remote_code": True,
-            }
-            if self.judge_quantization:
-                kwargs["quantization"] = self.judge_quantization
-
-            self._judge_llm = LLM(**kwargs)
+            self._judge_llm = self._load_llm(self.judge_model, self.judge_quantization)
         return self._judge_llm
 
     def generate(self, query: str, passages: list[dict[str, Any]]) -> str:
@@ -166,6 +183,7 @@ class QuantizedVLLMGeneratorJudge(BaseOracleGeneratorJudge):
         sampling_params = SamplingParams(
             temperature=0.0,
             max_tokens=256,
+            logprobs=1,
             stop=["\nQuestion:", "\nContext:"],
         )
         prompts = [build_generator_prompt(q, p) for q, p in query_passages_pairs]
@@ -212,8 +230,8 @@ class QuantizedVLLMGeneratorJudge(BaseOracleGeneratorJudge):
             graph_out = outputs[2 * i + 1].outputs[0].text
             score_flat = parse_judge_score(flat_out)
             score_graph = parse_judge_score(graph_out)
-            delta_judge = score_graph - score_flat
-            results.append((score_flat, score_graph, delta_judge))
+            semantic_gain = score_graph - score_flat
+            results.append((score_flat, score_graph, semantic_gain))
 
         return results
 

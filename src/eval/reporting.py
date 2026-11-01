@@ -9,6 +9,15 @@ if TYPE_CHECKING:
     from src.qpp.tabular_router import DisagreementMatrix
 
 
+def _write_latex_file(tex_str: str, filepath: str | Path | None) -> str:
+    """Helper to persist LaTeX string to disk if path is provided."""
+    if filepath is not None:
+        p = Path(filepath)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(tex_str, encoding="utf-8")
+    return tex_str
+
+
 def export_qpp_correlation_table_latex(
     metrics_by_model: dict[str, dict[str, Any]],
     filepath: str | Path | None = None,
@@ -44,13 +53,7 @@ def export_qpp_correlation_table_latex(
         r"\end{table}",
     ])
     tex_str = "\n".join(lines)
-
-    if filepath is not None:
-        p = Path(filepath)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(tex_str, encoding="utf-8")
-
-    return tex_str
+    return _write_latex_file(tex_str, filepath)
 
 
 def export_conservative_abstention_table_latex(
@@ -87,13 +90,7 @@ def export_conservative_abstention_table_latex(
         r"\end{table}",
     ])
     tex_str = "\n".join(lines)
-
-    if filepath is not None:
-        p = Path(filepath)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(tex_str, encoding="utf-8")
-
-    return tex_str
+    return _write_latex_file(tex_str, filepath)
 
 
 def export_hub_cleanup_ablation_table_latex(
@@ -116,12 +113,12 @@ def export_hub_cleanup_ablation_table_latex(
     for row in stages_data:
         stage = row.get("stage", "")
         gini = row.get("hub_access_gini", 0.0)
-        p5 = row.get("precision_at_5", 0.0)
-        r5 = row.get("recall_at_5", 0.0)
-        ent = row.get("ppr_entropy", 0.0)
+        precision_5 = row.get("precision_at_5", 0.0)
+        recall_5 = row.get("recall_at_5", 0.0)
+        ppr_entropy = row.get("ppr_entropy", 0.0)
 
         lines.append(
-            f"{stage} & {gini:.3f} & {p5:.3f} & {r5:.3f} & {ent:.3f} \\\\"
+            f"{stage} & {gini:.3f} & {precision_5:.3f} & {recall_5:.3f} & {ppr_entropy:.3f} \\\\"
         )
 
     lines.extend([
@@ -130,13 +127,7 @@ def export_hub_cleanup_ablation_table_latex(
         r"\end{table}",
     ])
     tex_str = "\n".join(lines)
-
-    if filepath is not None:
-        p = Path(filepath)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(tex_str, encoding="utf-8")
-
-    return tex_str
+    return _write_latex_file(tex_str, filepath)
 
 
 def export_router_disagreement_table_latex(
@@ -157,16 +148,17 @@ def export_router_disagreement_table_latex(
     ]
 
     for tau, mat in sorted(disagreement_sweep.items(), key=lambda x: x[0]):
-        agr = mat.agreement_rate * 100.0
-        dis = mat.disagreement_rate * 100.0
-        bf = mat.both_flat_count
-        bg = mat.both_graph_count
-        lf = mat.lexical_graph_semantic_flat_count
-        sf = mat.lexical_flat_semantic_graph_count
-        kappa = mat.cohen_kappa
+        agreement_pct = mat.agreement_rate * 100.0
+        disagreement_pct = mat.disagreement_rate * 100.0
+        both_flat = mat.both_flat_count
+        both_graph = mat.both_graph_count
+        lexical_only = mat.lexical_graph_semantic_flat_count
+        semantic_only = mat.lexical_flat_semantic_graph_count
+        cohen_kappa = mat.cohen_kappa
 
         lines.append(
-            f"{tau:.2f} & {agr:5.1f}\\% & {dis:5.1f}\\% & {bf} & {bg} & {lf} & {sf} & {kappa:.3f} \\\\"
+            f"{tau:.2f} & {agreement_pct:5.1f}\\% & {disagreement_pct:5.1f}\\% & "
+            f"{both_flat} & {both_graph} & {lexical_only} & {semantic_only} & {cohen_kappa:.3f} \\\\"
         )
 
     lines.extend([
@@ -175,13 +167,7 @@ def export_router_disagreement_table_latex(
         r"\end{table}",
     ])
     tex_str = "\n".join(lines)
-
-    if filepath is not None:
-        p = Path(filepath)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(tex_str, encoding="utf-8")
-
-    return tex_str
+    return _write_latex_file(tex_str, filepath)
 
 
 def export_zero_shot_transfer_table_latex(
@@ -218,10 +204,4 @@ def export_zero_shot_transfer_table_latex(
         r"\end{table}",
     ])
     tex_str = "\n".join(lines)
-
-    if filepath is not None:
-        p = Path(filepath)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(tex_str, encoding="utf-8")
-
-    return tex_str
+    return _write_latex_file(tex_str, filepath)

@@ -7,7 +7,9 @@ from src.adapters.vllm_adapter import (
     QuantizedVLLMGeneratorJudge,
     build_generator_prompt,
     build_judge_prompt,
+    build_pairwise_preference_prompt,
     parse_judge_score,
+    parse_pairwise_preference,
 )
 
 __all__ = [
@@ -19,5 +21,7 @@ __all__ = [
     "QuantizedVLLMGeneratorJudge",
     "build_generator_prompt",
     "build_judge_prompt",
+    "build_pairwise_preference_prompt",
     "parse_judge_score",
+    "parse_pairwise_preference",
 ]

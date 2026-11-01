@@ -96,6 +96,7 @@ class QueryResult:
     semantic_gain: float
     candidate_subgraph: CandidateSubgraphData
     classical_qpp: dict[str, float]
+    no_rag_answer: str = ""
 
 
 @dataclass
@@ -421,50 +422,23 @@ class ContextSelectionStudy:
         query_results: dict[str, QueryResult] = {}
         all_qpp: dict[str, list[float]] = collections.defaultdict(list)
 
+        # Step A: Perform retrieval and classical QPP indexing for all samples
+        intermediate: list[dict[str, Any]] = []
         for sample in samples:
-            # 1. Embed query
             q_vec = self.embedder.embed_texts([sample.question])[0]
-
-            # 2. Build Tri-Graph from corpus passages under configured cleanup stage
             trigraph = self.builder.build(sample.corpus_passages, stage=self.config.cleanup_stage)
 
-            # 3. Flat Dense retrieval (strict top-k passage budget parity)
             flat_top = self.retriever.retrieve_flat(
                 query_vec=q_vec,
                 graph=trigraph,
                 top_k=self.config.retrieval_top_k,
             )
-
-            # 4. Tri-Graph PPR retrieval & Candidate Subgraph extraction
             graph_top, candidate_subgraph = self.retriever.retrieve_graph(
                 query_vec=q_vec,
                 graph=trigraph,
                 flat_top_passages=flat_top,
                 top_k=self.config.retrieval_top_k,
             )
-
-            # 5. Oracle Generator pass with strict prompt template parity (ADR-0001)
-            flat_prompt = format_prompt(sample.question, flat_top)
-            graph_prompt = format_prompt(sample.question, graph_top)
-            flat_answer = self.oracle_judge.generate(sample.question, flat_top)
-            graph_answer = self.oracle_judge.generate(sample.question, graph_top)
-
-            # 6. Lexical Gain (Token F1 difference)
-            gold_ans = sample.gold_answers[0] if sample.gold_answers else ""
-            flat_f1 = compute_token_f1(flat_answer, gold_ans)
-            graph_f1 = compute_token_f1(graph_answer, gold_ans)
-            lexical_gain = graph_f1 - flat_f1
-
-            # 7. Semantic Gain (LLM judge rubric & preference)
-            flat_judge_score, graph_judge_score, sem_margin = self.oracle_judge.judge(
-                query=sample.question,
-                flat_answer=flat_answer,
-                graph_answer=graph_answer,
-                gold_answers=sample.gold_answers,
-            )
-            semantic_gain = graph_judge_score - flat_judge_score
-
-            # 8. Classical QPP baselines
             cqpp = compute_classical_qpp(
                 query=sample.question,
                 flat_passages=flat_top,
@@ -474,23 +448,82 @@ class ContextSelectionStudy:
             for k, v in cqpp.items():
                 all_qpp[k].append(v)
 
+            intermediate.append({
+                "sample": sample,
+                "flat_top": flat_top,
+                "graph_top": graph_top,
+                "candidate_subgraph": candidate_subgraph,
+                "cqpp": cqpp,
+            })
+
+        # Step B: Generator stage (No-RAG, Flat-RAG, Graph-RAG under Passage-Budget Parity)
+        if hasattr(self.oracle_judge, "generate_batch"):
+            pairs_to_generate: list[tuple[str, list[dict[str, Any]]]] = []
+            for item in intermediate:
+                q = item["sample"].question
+                pairs_to_generate.append((q, []))  # No-RAG baseline
+                pairs_to_generate.append((q, item["flat_top"]))
+                pairs_to_generate.append((q, item["graph_top"]))
+
+            generated_texts = self.oracle_judge.generate_batch(pairs_to_generate)
+            no_rag_answers = generated_texts[0::3]
+            flat_answers = generated_texts[1::3]
+            graph_answers = generated_texts[2::3]
+        else:
+            no_rag_answers = [self.oracle_judge.generate(item["sample"].question, []) for item in intermediate]
+            flat_answers = [self.oracle_judge.generate(item["sample"].question, item["flat_top"]) for item in intermediate]
+            graph_answers = [self.oracle_judge.generate(item["sample"].question, item["graph_top"]) for item in intermediate]
+
+        # Step C: Judge stage (Discrete rubric & pairwise preference margin)
+        if hasattr(self.oracle_judge, "judge_batch"):
+            tuples_to_judge = [
+                (item["sample"].question, flat_answers[i], graph_answers[i], item["sample"].gold_answers)
+                for i, item in enumerate(intermediate)
+            ]
+            judged_tuples = self.oracle_judge.judge_batch(tuples_to_judge)
+        else:
+            judged_tuples = [
+                self.oracle_judge.judge(
+                    query=item["sample"].question,
+                    flat_answer=flat_answers[i],
+                    graph_answer=graph_answers[i],
+                    gold_answers=item["sample"].gold_answers,
+                )
+                for i, item in enumerate(intermediate)
+            ]
+
+        # Step D: Assemble QueryResult objects
+        for i, item in enumerate(intermediate):
+            sample = item["sample"]
+            flat_ans = flat_answers[i]
+            graph_ans = graph_answers[i]
+            no_rag_ans = no_rag_answers[i]
+            flat_score, graph_score, _ = judged_tuples[i]
+
+            gold_ans = sample.gold_answers[0] if sample.gold_answers else ""
+            flat_f1 = compute_token_f1(flat_ans, gold_ans)
+            graph_f1 = compute_token_f1(graph_ans, gold_ans)
+            lexical_gain = graph_f1 - flat_f1
+            semantic_gain = graph_score - flat_score
+
             query_results[sample.query_id] = QueryResult(
                 query_id=sample.query_id,
                 dataset=sample.dataset,
                 question_type=sample.question_type,
                 question=sample.question,
-                flat_passages=flat_top,
-                graph_passages=graph_top,
-                flat_answer=flat_answer,
-                graph_answer=graph_answer,
+                flat_passages=item["flat_top"],
+                graph_passages=item["graph_top"],
+                flat_answer=flat_ans,
+                graph_answer=graph_ans,
                 flat_f1=flat_f1,
                 graph_f1=graph_f1,
                 lexical_gain=lexical_gain,
-                flat_judge_score=flat_judge_score,
-                graph_judge_score=graph_judge_score,
+                flat_judge_score=flat_score,
+                graph_judge_score=graph_score,
                 semantic_gain=semantic_gain,
-                candidate_subgraph=candidate_subgraph,
-                classical_qpp=cqpp,
+                candidate_subgraph=item["candidate_subgraph"],
+                classical_qpp=item["cqpp"],
+                no_rag_answer=no_rag_ans,
             )
 
         summary_qpp = {k: float(np.mean(vals)) for k, vals in all_qpp.items()}

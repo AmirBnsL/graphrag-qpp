@@ -28,6 +28,7 @@ def save_study_artifacts(
 
     rows: list[dict[str, Any]] = []
     subgraphs: dict[str, CandidateSubgraphData] = {}
+    retrieval_outputs: dict[str, dict[str, Any]] = {}
 
     for qid, res in report.query_results.items():
         row: dict[str, Any] = {
@@ -35,6 +36,7 @@ def save_study_artifacts(
             "dataset": res.dataset,
             "question_type": res.question_type,
             "question": res.question,
+            "no_rag_answer": getattr(res, "no_rag_answer", ""),
             "flat_answer": res.flat_answer,
             "graph_answer": res.graph_answer,
             "flat_f1": float(res.flat_f1),
@@ -44,6 +46,8 @@ def save_study_artifacts(
             "graph_judge_score": float(res.graph_judge_score),
             "semantic_gain": float(res.semantic_gain),
             "ppr_entropy_drift": float(res.candidate_subgraph.ppr_entropy_drift),
+            "flat_passages_json": json.dumps(res.flat_passages),
+            "graph_passages_json": json.dumps(res.graph_passages),
         }
         # Classical QPP features
         for k, v in res.classical_qpp.items():
@@ -51,11 +55,15 @@ def save_study_artifacts(
 
         rows.append(row)
         subgraphs[qid] = res.candidate_subgraph
+        retrieval_outputs[qid] = {
+            "flat_passages": res.flat_passages,
+            "graph_passages": res.graph_passages,
+        }
 
     df = pd.DataFrame(rows)
     df.to_parquet(parquet_file, index=False)
 
-    torch.save(subgraphs, pt_file)
+    torch.save({"subgraphs": subgraphs, "retrieval_outputs": retrieval_outputs}, pt_file)
 
     return parquet_file, pt_file
 
@@ -74,7 +82,11 @@ def load_study_artifacts(
         raise FileNotFoundError(f"Missing candidate subgraphs PyTorch file: {pt_file}")
 
     df = pd.read_parquet(parquet_file)
-    subgraphs: dict[str, CandidateSubgraphData] = torch.load(pt_file, weights_only=False)
+    raw_pt: Any = torch.load(pt_file, weights_only=False)
+    if isinstance(raw_pt, dict) and "subgraphs" in raw_pt:
+        subgraphs: dict[str, CandidateSubgraphData] = raw_pt["subgraphs"]
+    else:
+        subgraphs = raw_pt
 
     return df, subgraphs
 
