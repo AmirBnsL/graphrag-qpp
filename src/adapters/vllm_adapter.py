@@ -22,9 +22,15 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 logger = logging.getLogger(__name__)
 
 
-def build_generator_prompt(query: str, passages: list[dict[str, Any]]) -> str:
+def build_generator_prompt(query: str, passages: list[dict[str, Any]], max_passage_chars: int = 2400) -> str:
     """Format RAG prompt with strict Passage-Budget Parity template (ADR-0001)."""
-    context = "\n\n".join(f"[{i+1}] {p.get('text', '')}" for i, p in enumerate(passages))
+    formatted_passages = []
+    for i, p in enumerate(passages):
+        txt = p.get("text", "")
+        if len(txt) > max_passage_chars:
+            txt = txt[:max_passage_chars] + "... [truncated]"
+        formatted_passages.append(f"[{i+1}] {txt}")
+    context = "\n\n".join(formatted_passages)
     return (
         f"Context passages:\n{context}\n\n"
         f"Question: {query}\n"
@@ -110,8 +116,8 @@ class QuantizedVLLMGeneratorJudge(BaseOracleGeneratorJudge):
         judge_model: str = "google/gemma-4-12B-it",
         generator_quantization: str = "awq",
         judge_quantization: str = "awq",
-        gpu_memory_utilization: float = 0.40,
-        max_model_len: int = 4096,
+        gpu_memory_utilization: float = 0.50,
+        max_model_len: int = 8192,
         seed: int = 42,
     ) -> None:
         self.generator_model = generator_model

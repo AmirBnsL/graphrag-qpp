@@ -116,7 +116,8 @@ def setup_adapters(mode: str) -> tuple[BaseEmbedder, BaseOracleGeneratorJudge]:
             judge_model="neuralmagic/gemma-2-9b-it-FP8",
             generator_quantization="awq",
             judge_quantization="fp8",
-            gpu_memory_utilization=0.40,
+            gpu_memory_utilization=0.50,
+            max_model_len=8192,
         )
         return embedder, oracle_judge
     else:
