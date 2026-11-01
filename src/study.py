@@ -106,6 +106,20 @@ class StudyReport:
     classical_qpp_results: dict[str, float]
     config: StudyConfig
 
+    @property
+    def mean_lexical_gain(self) -> float:
+        """Mean token F1 gain across all evaluated queries."""
+        if not self.query_results:
+            return 0.0
+        return float(np.mean([r.lexical_gain for r in self.query_results.values()]))
+
+    @property
+    def mean_semantic_gain(self) -> float:
+        """Mean LLM judge score gain across all evaluated queries."""
+        if not self.query_results:
+            return 0.0
+        return float(np.mean([r.semantic_gain for r in self.query_results.values()]))
+
     def evaluate_conservative_abstention(
         self,
         tau: float = 0.10,
