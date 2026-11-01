@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
+
+# Prevent headless Colab from blocking on web UI secrets vault
+os.environ.setdefault("HF_HUB_DISABLE_COLAB_SECRETS", "1")
+os.environ.setdefault("VERTEX_PRODUCT", "COLAB_ENTERPRISE")
 
 import numpy as np
 from scipy.stats import spearmanr
@@ -106,10 +111,10 @@ def setup_adapters(mode: str) -> tuple[BaseEmbedder, BaseOracleGeneratorJudge]:
         logger.info("Initializing GPU production adapters (Qwen3-Embedding & Quantized vLLM)...")
         embedder: BaseEmbedder = QwenEmbedder(model_name="Qwen/Qwen3-Embedding-0.6B")
         oracle_judge: BaseOracleGeneratorJudge = QuantizedVLLMGeneratorJudge(
-            generator_model="Qwen/Qwen3.5-9B-AWQ",
-            judge_model="google/gemma-4-12B-it",
+            generator_model="Qwen/Qwen2.5-7B-Instruct-AWQ",
+            judge_model="neuralmagic/gemma-2-9b-it-FP8",
             generator_quantization="awq",
-            judge_quantization="awq",
+            judge_quantization="fp8",
             gpu_memory_utilization=0.40,
         )
         return embedder, oracle_judge
