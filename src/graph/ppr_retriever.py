@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
+import networkx as nx
 import numpy as np
 from scipy import sparse
 
@@ -26,6 +27,7 @@ class CandidateSubgraphData:
     ppr_entropy_drift: float   # Scalar Shannon entropy drift: H(p_deep) - H(p_shallow)
     directional_distance_encoding: np.ndarray  # Shape: [N]
     node_labels: list[str]
+    edge_attr: np.ndarray = field(default_factory=lambda: np.empty((0, 1), dtype=np.float32))
 
 
 def _power_iteration_ppr(
@@ -245,6 +247,16 @@ class PPRRetriever:
         is_s = np.array([1.0 if orig in graph.sentence_indices else 0.0 for orig in subgraph_nodes]).reshape(-1, 1)
         is_e = np.array([1.0 if orig in graph.entity_indices else 0.0 for orig in subgraph_nodes]).reshape(-1, 1)
 
+        # Node k-core number (ADR-0003, Issue #1 US 15)
+        if n_sub > 0 and edge_index.shape[1] > 0:
+            sub_g = nx.Graph()
+            sub_g.add_nodes_from(range(n_sub))
+            sub_g.add_edges_from(zip(edge_index[0].tolist(), edge_index[1].tolist()))
+            core_dict = nx.core_number(sub_g)
+            k_core_arr = np.array([core_dict.get(i, 0) for i in range(n_sub)], dtype=np.float32).reshape(-1, 1)
+        else:
+            k_core_arr = np.zeros((n_sub, 1), dtype=np.float32)
+
         node_features = np.concatenate(
             [
                 query_sim,
@@ -259,9 +271,18 @@ class PPRRetriever:
                 is_p,
                 is_s,
                 is_e,
+                k_core_arr,
             ],
             axis=1,
         ).astype(np.float32)
+
+        # Pairwise edge semantic similarity (ADR-0003, Issue #1 US 15)
+        if edge_index.shape[1] > 0:
+            u_idx = edge_index[0]
+            v_idx = edge_index[1]
+            edge_attr = np.sum(sub_embeds[u_idx] * sub_embeds[v_idx], axis=1, keepdims=True).astype(np.float32)
+        else:
+            edge_attr = np.empty((0, 1), dtype=np.float32)
 
         node_labels = []
         for orig in subgraph_nodes:
@@ -283,6 +304,7 @@ class PPRRetriever:
             ppr_entropy_drift=entropy_drift,
             directional_distance_encoding=dde,
             node_labels=node_labels,
+            edge_attr=edge_attr,
         )
 
         return graph_passages, subgraph_data

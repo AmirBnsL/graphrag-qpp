@@ -2,9 +2,12 @@
 
 from src.qpp.classical import compute_classical_qpp
 from src.qpp.gnn_router import (
+    EDGE_FEATURE_DIM,
+    NODE_FEATURE_DIM,
     GATv2ContextSelector,
     TopologicalGNNRouter,
     candidate_subgraph_to_pyg_data,
+    evaluate_gnn_dual_routers,
     evaluate_gnn_in_domain_cv,
     evaluate_gnn_zero_shot_transfer,
 )
@@ -38,4 +41,7 @@ __all__ = [
     "TopologicalGNNRouter",
     "evaluate_gnn_in_domain_cv",
     "evaluate_gnn_zero_shot_transfer",
+    "evaluate_gnn_dual_routers",
+    "NODE_FEATURE_DIM",
+    "EDGE_FEATURE_DIM",
 ]

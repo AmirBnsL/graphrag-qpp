@@ -23,6 +23,7 @@ from src.qpp.classical import compute_classical_qpp
 from src.qpp.gnn_router import (
     TopologicalGNNRouter,
     candidate_subgraph_to_pyg_data,
+    evaluate_gnn_dual_routers,
     evaluate_gnn_in_domain_cv,
     evaluate_gnn_zero_shot_transfer,
 )
@@ -307,6 +308,79 @@ class StudyReport:
             epochs=epochs,
             lr=lr,
             random_state=random_state,
+        )
+
+    def evaluate_dual_gnn_routers(
+        self,
+        n_splits: int = 5,
+        tau_sweep: list[float] | None = None,
+        epochs: int = 20,
+        lr: float = 0.01,
+        random_state: int = 42,
+    ) -> dict[str, Any]:
+        """Train separate Lexical and Semantic GNN routers, returning CV results and router disagreement sweep (Issue #5)."""
+        sweep = tau_sweep or self.config.gain_margin_thresholds
+        graphs: list[Any] = []
+        y_lex: list[float] = []
+        y_sem: list[float] = []
+        for res in self.query_results.values():
+            y_l = res.lexical_gain
+            y_s = res.semantic_gain
+            graphs.append(candidate_subgraph_to_pyg_data(res.candidate_subgraph, label=y_s))
+            y_lex.append(y_l)
+            y_sem.append(y_s)
+
+        return evaluate_gnn_dual_routers(
+            graphs=graphs,
+            y_lexical=np.array(y_lex, dtype=np.float32),
+            y_semantic=np.array(y_sem, dtype=np.float32),
+            n_splits=n_splits,
+            tau_sweep=sweep,
+            epochs=epochs,
+            lr=lr,
+            random_state=random_state,
+        )
+
+    def evaluate_gnn_zero_shot_transfer(
+        self,
+        target_report: StudyReport,
+        target: str = "semantic",
+        tau_sweep: list[float] | None = None,
+        epochs: int = 20,
+        lr: float = 0.01,
+        random_state: int = 42,
+    ) -> TransferResult:
+        """Evaluate Zero-Shot Topological Transfer of GNN from this study to another benchmark (GLOSSARY.md)."""
+        if target not in ("semantic", "lexical"):
+            raise ValueError(f"Invalid target: '{target}'. Expected 'semantic' or 'lexical'.")
+        sweep = tau_sweep or self.config.gain_margin_thresholds
+
+        graphs_train: list[Any] = []
+        targets_train: list[float] = []
+        for res in self.query_results.values():
+            y = res.semantic_gain if target == "semantic" else res.lexical_gain
+            graphs_train.append(candidate_subgraph_to_pyg_data(res.candidate_subgraph, label=y))
+            targets_train.append(y)
+
+        graphs_target: list[Any] = []
+        targets_target: list[float] = []
+        for res in target_report.query_results.values():
+            y = res.semantic_gain if target == "semantic" else res.lexical_gain
+            graphs_target.append(candidate_subgraph_to_pyg_data(res.candidate_subgraph, label=y))
+            targets_target.append(y)
+
+        router = TopologicalGNNRouter(
+            epochs=epochs,
+            lr=lr,
+            random_state=random_state,
+        )
+        router.fit(graphs_train, np.array(targets_train, dtype=np.float32))
+
+        return evaluate_gnn_zero_shot_transfer(
+            router=router,
+            graphs_target=graphs_target,
+            targets_target=np.array(targets_target, dtype=np.float32),
+            tau_sweep=sweep,
         )
 
 

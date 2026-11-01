@@ -17,14 +17,18 @@ from torch_geometric.utils import softmax
 
 from src.graph.ppr_retriever import CandidateSubgraphData
 from src.qpp.tabular_router import (
+    DisagreementMatrix,
     TabularCVResult,
     TransferResult,
     _compute_gain_regression_metrics,
     evaluate_conservative_abstention_sweep,
+    evaluate_router_disagreement_sweep,
 )
 
-# Domain-agnostic feature indices (ADR-0003)
+# Domain-agnostic feature schema constants (ADR-0003)
 COL_QUERY_SIM: int = 0
+NODE_FEATURE_DIM: int = 13  # query_sim, ppr_shallow, ppr_deep, ppr_drift, sub_deg, global_deg, idf, dde, is_flat, is_p, is_s, is_e, k_core
+EDGE_FEATURE_DIM: int = 1   # pairwise edge semantic cosine similarity
 
 
 def candidate_subgraph_to_pyg_data(
@@ -35,6 +39,14 @@ def candidate_subgraph_to_pyg_data(
     x = torch.from_numpy(candidate_subgraph.node_features.astype(np.float32))
     edge_index = torch.from_numpy(candidate_subgraph.edge_index.astype(np.int64))
 
+    # Pairwise edge semantic similarity (ADR-0003)
+    if hasattr(candidate_subgraph, "edge_attr") and candidate_subgraph.edge_attr is not None and len(candidate_subgraph.edge_attr) > 0:
+        edge_attr = torch.from_numpy(candidate_subgraph.edge_attr.astype(np.float32))
+    elif edge_index.shape[1] > 0:
+        edge_attr = torch.ones((edge_index.shape[1], EDGE_FEATURE_DIM), dtype=torch.float32)
+    else:
+        edge_attr = torch.empty((0, EDGE_FEATURE_DIM), dtype=torch.float32)
+
     y_tensor = (
         torch.tensor([label], dtype=torch.float32)
         if label is not None
@@ -44,6 +56,7 @@ def candidate_subgraph_to_pyg_data(
     return Data(
         x=x,
         edge_index=edge_index,
+        edge_attr=edge_attr,
         y=y_tensor,
         num_nodes=candidate_subgraph.num_nodes,
     )
@@ -73,14 +86,15 @@ class QuerySimilarityAttentionReadout(nn.Module):
 
 
 class GATv2ContextSelector(nn.Module):
-    """2-layer GATv2 Graph Attention Network with query-similarity attention readout (ADR-0003, Issue #5)."""
+    """2-layer GATv2 Graph Attention Network with pairwise edge similarity and query-similarity attention readout (ADR-0003, Issue #5)."""
 
     def __init__(
         self,
-        in_channels: int = 12,
+        in_channels: int = NODE_FEATURE_DIM,
         hidden_channels: int = 16,
         heads: int = 4,
         dropout: float = 0.1,
+        edge_dim: int = EDGE_FEATURE_DIM,
     ) -> None:
         super().__init__()
         self.conv1 = GATv2Conv(
@@ -88,6 +102,7 @@ class GATv2ContextSelector(nn.Module):
             out_channels=hidden_channels,
             heads=heads,
             concat=True,
+            edge_dim=edge_dim,
         )
         self.act1 = nn.ELU()
         self.drop1 = nn.Dropout(dropout)
@@ -97,6 +112,7 @@ class GATv2ContextSelector(nn.Module):
             out_channels=hidden_channels,
             heads=1,
             concat=False,
+            edge_dim=edge_dim,
         )
         self.act2 = nn.ELU()
 
@@ -115,13 +131,14 @@ class GATv2ContextSelector(nn.Module):
         self,
         x: torch.Tensor,
         edge_index: torch.Tensor,
+        edge_attr: torch.Tensor | None = None,
         batch: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # Layer 1 message passing
-        h1 = self.drop1(self.act1(self.conv1(x, edge_index)))
+        # Layer 1 message passing with edge similarity attributes
+        h1 = self.drop1(self.act1(self.conv1(x, edge_index, edge_attr=edge_attr)))
 
-        # Layer 2 message passing
-        h2 = self.act2(self.conv2(h1, edge_index))
+        # Layer 2 message passing with edge similarity attributes
+        h2 = self.act2(self.conv2(h1, edge_index, edge_attr=edge_attr))
 
         # Query-similarity attention readout
         query_sim = x[:, COL_QUERY_SIM : COL_QUERY_SIM + 1]
@@ -137,10 +154,11 @@ class TopologicalGNNRouter:
 
     def __init__(
         self,
-        in_channels: int = 12,
+        in_channels: int = NODE_FEATURE_DIM,
         hidden_channels: int = 16,
         heads: int = 4,
         dropout: float = 0.1,
+        edge_dim: int = EDGE_FEATURE_DIM,
         epochs: int = 20,
         lr: float = 0.01,
         weight_decay: float = 1e-4,
@@ -152,6 +170,7 @@ class TopologicalGNNRouter:
         self.hidden_channels = hidden_channels
         self.heads = heads
         self.dropout = dropout
+        self.edge_dim = edge_dim
         self.epochs = epochs
         self.lr = lr
         self.weight_decay = weight_decay
@@ -165,6 +184,7 @@ class TopologicalGNNRouter:
             hidden_channels=self.hidden_channels,
             heads=self.heads,
             dropout=self.dropout,
+            edge_dim=self.edge_dim,
         ).to(self.device)
         self.is_fitted = False
 
@@ -195,7 +215,8 @@ class TopologicalGNNRouter:
             for batch in loader:
                 batch = batch.to(self.device)
                 optimizer.zero_grad()
-                preds = self.model(batch.x, batch.edge_index, batch.batch)
+                edge_attr = batch.edge_attr if hasattr(batch, "edge_attr") else None
+                preds = self.model(batch.x, batch.edge_index, edge_attr=edge_attr, batch=batch.batch)
                 loss = criterion(preds, batch.y)
                 loss.backward()
                 optimizer.step()
@@ -215,7 +236,8 @@ class TopologicalGNNRouter:
         with torch.no_grad():
             for batch in loader:
                 batch = batch.to(self.device)
-                preds = self.model(batch.x, batch.edge_index, batch.batch)
+                edge_attr = batch.edge_attr if hasattr(batch, "edge_attr") else None
+                preds = self.model(batch.x, batch.edge_index, edge_attr=edge_attr, batch=batch.batch)
                 all_preds.append(preds.cpu().numpy().reshape(-1))
 
         if not all_preds:
@@ -243,9 +265,10 @@ def evaluate_gnn_in_domain_cv(
         tau_sweep = [0.0, 0.05, 0.10, 0.15, 0.20]
     if router_kwargs is None:
         router_kwargs = {
-            "in_channels": 12,
+            "in_channels": NODE_FEATURE_DIM,
             "hidden_channels": 16,
-            "heads": 2,
+            "heads": 4,
+            "edge_dim": EDGE_FEATURE_DIM,
             "epochs": epochs,
             "lr": lr,
             "random_state": random_state,
@@ -315,3 +338,52 @@ def evaluate_gnn_zero_shot_transfer(
         mae=mae,
         tau_sweep_results=sweep_results,
     )
+
+
+def evaluate_gnn_dual_routers(
+    graphs: list[Data],
+    y_lexical: np.ndarray,
+    y_semantic: np.ndarray,
+    n_splits: int = 5,
+    tau_sweep: list[float] | None = None,
+    epochs: int = 20,
+    lr: float = 0.01,
+    random_state: int = 42,
+    router_kwargs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Train separate Lexical and Semantic GNN routers and report CV results and router disagreement sweep (Issue #5)."""
+    if tau_sweep is None:
+        tau_sweep = [0.0, 0.05, 0.10, 0.15, 0.20]
+
+    lexical_cv = evaluate_gnn_in_domain_cv(
+        graphs=graphs,
+        targets=y_lexical,
+        n_splits=n_splits,
+        tau_sweep=tau_sweep,
+        epochs=epochs,
+        lr=lr,
+        random_state=random_state,
+        router_kwargs=router_kwargs,
+    )
+    semantic_cv = evaluate_gnn_in_domain_cv(
+        graphs=graphs,
+        targets=y_semantic,
+        n_splits=n_splits,
+        tau_sweep=tau_sweep,
+        epochs=epochs,
+        lr=lr,
+        random_state=random_state,
+        router_kwargs=router_kwargs,
+    )
+
+    disagreement_sweep = evaluate_router_disagreement_sweep(
+        lexical_preds=lexical_cv.out_of_fold_predictions,
+        semantic_preds=semantic_cv.out_of_fold_predictions,
+        tau_sweep=tau_sweep,
+    )
+
+    return {
+        "lexical_cv": lexical_cv,
+        "semantic_cv": semantic_cv,
+        "disagreement_sweep": disagreement_sweep,
+    }

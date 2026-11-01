@@ -12,13 +12,16 @@ from src.data.loader import QuerySample
 from src.graph.ppr_retriever import CandidateSubgraphData, PPRRetriever
 from src.graph.trigraph_builder import CleanupStage, TriGraphBuilder
 from src.qpp.gnn_router import (
+    EDGE_FEATURE_DIM,
+    NODE_FEATURE_DIM,
     GATv2ContextSelector,
     TopologicalGNNRouter,
     candidate_subgraph_to_pyg_data,
+    evaluate_gnn_dual_routers,
     evaluate_gnn_in_domain_cv,
     evaluate_gnn_zero_shot_transfer,
 )
-from src.qpp.tabular_router import TabularCVResult, TransferResult
+from src.qpp.tabular_router import DisagreementMatrix, TabularCVResult, TransferResult
 from src.study import StudyConfig, run_qpp_study
 
 
@@ -30,8 +33,8 @@ def _create_mock_candidate_subgraph(
     """Create a synthetic CandidateSubgraphData with domain-agnostic scalar features."""
     rng = np.random.default_rng(seed)
 
-    # 12 scalar features (ADR-0003: D < 32, zero 1024-d text embeddings)
-    features = np.zeros((n_nodes, 12), dtype=np.float32)
+    # 13 scalar features (ADR-0003: D = 13 < 32, zero 1024-d text embeddings)
+    features = np.zeros((n_nodes, 13), dtype=np.float32)
     # Col 0: query_sim
     features[:, 0] = rng.uniform(0.2, 0.8, size=n_nodes)
     features[0, 0] = 0.9  # Seed entity high query sim
@@ -51,11 +54,16 @@ def _create_mock_candidate_subgraph(
     features[:3, 9] = 1.0  # Passages
     features[3:5, 10] = 1.0  # Sentences
     features[5:, 11] = 1.0  # Entities
+    # Col 12: k_core
+    features[:, 12] = rng.uniform(1.0, 3.0, size=n_nodes)
 
     # Simple connected path / tree edge_index
     src = list(range(n_nodes - 1)) + list(range(1, n_nodes))
     dst = list(range(1, n_nodes)) + list(range(n_nodes - 1))
     edge_index = np.array([src, dst], dtype=np.int64)
+
+    # Pairwise edge semantic cosine similarity attribute [E, 1]
+    edge_attr = np.full((edge_index.shape[1], 1), fill_value=0.75, dtype=np.float32)
 
     return CandidateSubgraphData(
         num_nodes=n_nodes,
@@ -67,6 +75,7 @@ def _create_mock_candidate_subgraph(
         ppr_entropy_drift=float(bridge_strength * 0.2),
         directional_distance_encoding=dde,
         node_labels=[f"node_{i}" for i in range(n_nodes)],
+        edge_attr=edge_attr,
     )
 
 
@@ -76,17 +85,22 @@ def test_candidate_subgraph_to_pyg_data_invariants():
     pyg_data = candidate_subgraph_to_pyg_data(cand, label=0.25)
 
     assert isinstance(pyg_data, Data)
-    # Feature dimension must be strictly less than 32 (ADR-0003, zero 1024-d text embeddings)
-    assert pyg_data.x.shape == (8, 12)
+    # Feature dimension must be strictly less than 32 (ADR-0003: 13 scalar signals, zero 1024-d text embeddings)
+    assert pyg_data.x.shape == (8, 13)
+    assert pyg_data.x.shape[1] == NODE_FEATURE_DIM
     assert pyg_data.x.shape[1] < 32
     assert pyg_data.edge_index.shape[0] == 2
     assert pyg_data.edge_index.shape[1] == 14  # 7 undirected edges * 2
+    assert pyg_data.edge_attr is not None
+    assert pyg_data.edge_attr.shape == (14, 1)
+    assert pyg_data.edge_attr.shape[1] == EDGE_FEATURE_DIM
     assert pyg_data.y.item() == pytest.approx(0.25)
     assert torch.all(torch.isfinite(pyg_data.x))
+    assert torch.all(torch.isfinite(pyg_data.edge_attr))
 
 
 def test_gatv2_architecture_forward_pass_and_gradient_flow():
-    """Verify 2-layer GATv2 architecture with query-similarity attention readout and backprop."""
+    """Verify 2-layer GATv2 architecture with query-similarity attention readout, edge attributes, and backprop."""
     cand1 = _create_mock_candidate_subgraph(n_nodes=6, seed=1)
     cand2 = _create_mock_candidate_subgraph(n_nodes=8, seed=2)
 
@@ -94,10 +108,15 @@ def test_gatv2_architecture_forward_pass_and_gradient_flow():
     data2 = candidate_subgraph_to_pyg_data(cand2, label=-0.2)
     batch = Batch.from_data_list([data1, data2])
 
-    model = GATv2ContextSelector(in_channels=12, hidden_channels=16, heads=2)
+    model = GATv2ContextSelector(
+        in_channels=NODE_FEATURE_DIM,
+        hidden_channels=16,
+        heads=2,
+        edge_dim=EDGE_FEATURE_DIM,
+    )
     model.train()
 
-    preds = model(batch.x, batch.edge_index, batch.batch)
+    preds = model(batch.x, batch.edge_index, edge_attr=batch.edge_attr, batch=batch.batch)
     assert preds.shape == (2,)
 
     # Test backward pass and valid gradient flow across all parameters
@@ -121,9 +140,10 @@ def test_topological_gnn_router_fit_predict_route():
     targets = np.array([g.y.item() for g in graphs], dtype=np.float32)
 
     router = TopologicalGNNRouter(
-        in_channels=12,
+        in_channels=NODE_FEATURE_DIM,
         hidden_channels=16,
         heads=2,
+        edge_dim=EDGE_FEATURE_DIM,
         epochs=15,
         lr=0.01,
         random_state=42,
@@ -150,8 +170,8 @@ def test_gnn_five_fold_in_domain_cv():
     for i in range(25):
         strength = float((i % 5) - 2) * 0.2  # Range [-0.4, 0.4]
         cand = _create_mock_candidate_subgraph(n_nodes=8, bridge_strength=strength, seed=i)
-        # Inject strong signal into query_sim of bridge entity to enable learnability
-        cand.node_features[5, 0] = float(0.5 + strength)
+        # Inject strong signal into query_sim of Candidate Subgraph to enable learnability
+        cand.node_features[:, 0] = float(0.5 + strength)
         data = candidate_subgraph_to_pyg_data(cand, label=strength)
         graphs.append(data)
         targets.append(strength)
@@ -172,6 +192,41 @@ def test_gnn_five_fold_in_domain_cv():
     assert np.all(np.isfinite(cv_result.out_of_fold_predictions))
     assert cv_result.spearman_rho > 0.0
     assert len(cv_result.tau_sweep_results) == 5
+
+
+def test_gnn_dual_routers_disagreement_sweep():
+    """Verify joint evaluation of Lexical and Semantic GNN routers and disagreement sweep."""
+    graphs = []
+    y_lex = []
+    y_sem = []
+    for i in range(20):
+        strength_lex = float((i % 4) - 1.5) * 0.2
+        strength_sem = float(((i + 1) % 4) - 1.5) * 0.2
+        cand = _create_mock_candidate_subgraph(n_nodes=8, bridge_strength=strength_sem, seed=i)
+        cand.node_features[5, 0] = float(0.5 + strength_sem)
+        data = candidate_subgraph_to_pyg_data(cand, label=strength_sem)
+        graphs.append(data)
+        y_lex.append(strength_lex)
+        y_sem.append(strength_sem)
+
+    dual_results = evaluate_gnn_dual_routers(
+        graphs=graphs,
+        y_lexical=np.array(y_lex, dtype=np.float32),
+        y_semantic=np.array(y_sem, dtype=np.float32),
+        n_splits=2,
+        tau_sweep=[0.0, 0.05, 0.10],
+        epochs=10,
+        random_state=42,
+    )
+
+    assert "lexical_cv" in dual_results
+    assert "semantic_cv" in dual_results
+    assert "disagreement_sweep" in dual_results
+    assert isinstance(dual_results["lexical_cv"], TabularCVResult)
+    assert isinstance(dual_results["semantic_cv"], TabularCVResult)
+    assert len(dual_results["disagreement_sweep"]) == 3
+    for tau in [0.0, 0.05, 0.10]:
+        assert isinstance(dual_results["disagreement_sweep"][tau], DisagreementMatrix)
 
 
 def test_gnn_zero_shot_topological_transfer():
@@ -197,7 +252,13 @@ def test_gnn_zero_shot_topological_transfer():
         target_targets.append(strength)
 
     router = TopologicalGNNRouter(
-        in_channels=12, hidden_channels=16, heads=2, epochs=20, lr=0.01, random_state=42
+        in_channels=NODE_FEATURE_DIM,
+        hidden_channels=16,
+        heads=2,
+        edge_dim=EDGE_FEATURE_DIM,
+        epochs=20,
+        lr=0.01,
+        random_state=42,
     )
     router.fit(source_graphs, np.array(source_targets, dtype=np.float32))
 
@@ -214,8 +275,8 @@ def test_gnn_zero_shot_topological_transfer():
     assert len(transfer_result.tau_sweep_results) == 5
 
 
-def test_study_report_evaluate_topological_gnn():
-    """Verify StudyReport seam method evaluate_topological_gnn."""
+def test_study_report_evaluate_topological_gnn_and_dual_routers():
+    """Verify StudyReport seam methods evaluate_topological_gnn and evaluate_dual_gnn_routers."""
     embedder = FakeEmbedder()
     oracle_judge = FakeOracleGeneratorJudge()
     config = StudyConfig(retrieval_top_k=2)
@@ -235,6 +296,84 @@ def test_study_report_evaluate_topological_gnn():
 
     report = run_qpp_study(samples, config=config, embedder=embedder, oracle_judge=oracle_judge)
 
+    with pytest.raises(ValueError, match="Invalid target"):
+        report.evaluate_topological_gnn(target="invalid_target")
+
     gnn_cv_result = report.evaluate_topological_gnn(target="semantic", n_splits=2, epochs=5)
     assert isinstance(gnn_cv_result, TabularCVResult)
     assert len(gnn_cv_result.out_of_fold_predictions) == 4
+
+    dual_gnn_result = report.evaluate_dual_gnn_routers(n_splits=2, epochs=5)
+    assert "lexical_cv" in dual_gnn_result
+    assert "semantic_cv" in dual_gnn_result
+    assert "disagreement_sweep" in dual_gnn_result
+    assert isinstance(dual_gnn_result["lexical_cv"], TabularCVResult)
+    assert isinstance(dual_gnn_result["semantic_cv"], TabularCVResult)
+
+
+def test_gnn_multihop_to_conversational_zero_shot_transfer():
+    """Verify Zero-Shot Topological Transfer between multi-hop QA and conversational memory."""
+    embedder = FakeEmbedder()
+    oracle_judge = FakeOracleGeneratorJudge()
+    config = StudyConfig(retrieval_top_k=2)
+
+    # Multi-hop QA corpus (HotpotQA domain)
+    passages_hotpot = [
+        {"passage_id": "h1", "text": "Superconducting circuit uses FluxQubit technology.", "sentences": ["Superconducting circuit uses FluxQubit technology."]},
+        {"passage_id": "h2", "text": "FluxQubit couples to JosephsonJunction resonator.", "sentences": ["FluxQubit couples to JosephsonJunction resonator."]},
+        {"passage_id": "h3", "text": "Quantum coherence requires isolated JosephsonJunction.", "sentences": ["Quantum coherence requires isolated JosephsonJunction."]},
+    ]
+    samples_hotpot = [
+        QuerySample(
+            query_id=f"qh_{i}", dataset="HotpotQA", question_type="multi-hop",
+            question=f"Does superconducting circuit {i} enable quantum coherence via FluxQubit and JosephsonJunction?",
+            gold_answers=["yes"],
+            gold_evidence_ids=["h1", "h2", "h3"],
+            corpus_passages=passages_hotpot,
+        )
+        for i in range(1, 5)
+    ]
+
+    # Conversational memory corpus (LongMemEval-S domain)
+    passages_longmem = [
+        {"passage_id": "m1", "text": "Session 1: User approved AlphaProject budget in March.", "sentences": ["Session 1: User approved AlphaProject budget in March."]},
+        {"passage_id": "m2", "text": "Session 2: BetaProject travel expenses postponed.", "sentences": ["Session 2: BetaProject travel expenses postponed."]},
+        {"passage_id": "m3", "text": "Session 3: AlphaProject budget increased by ten percent.", "sentences": ["Session 3: AlphaProject budget increased by ten percent."]},
+    ]
+    samples_longmem = [
+        QuerySample(
+            query_id=f"qm_{i}", dataset="LongMemEval-S", question_type="conversational",
+            question=f"What was approved for AlphaProject in meeting {i}?",
+            gold_answers=["budget approved"],
+            gold_evidence_ids=["m1", "m3"],
+            corpus_passages=passages_longmem,
+        )
+        for i in range(1, 5)
+    ]
+
+    report_hotpot = run_qpp_study(samples_hotpot, config=config, embedder=embedder, oracle_judge=oracle_judge)
+    report_longmem = run_qpp_study(samples_longmem, config=config, embedder=embedder, oracle_judge=oracle_judge)
+
+    with pytest.raises(ValueError, match="Invalid target"):
+        report_hotpot.evaluate_gnn_zero_shot_transfer(target_report=report_longmem, target="invalid")
+
+    transfer_result: TransferResult = report_hotpot.evaluate_gnn_zero_shot_transfer(
+        target_report=report_longmem,
+        target="semantic",
+        tau_sweep=[0.0, 0.05, 0.10, 0.15, 0.20],
+        epochs=5,
+    )
+
+    assert isinstance(transfer_result, TransferResult)
+    assert len(transfer_result.predictions) == 4
+    assert len(transfer_result.true_gains) == 4
+    assert np.all(np.isfinite(transfer_result.predictions))
+    assert len(transfer_result.tau_sweep_results) == 5
+
+    # Conservative Graph Abstention monotonicity check: graph selection fraction is non-increasing in tau
+    graph_fractions = [
+        transfer_result.tau_sweep_results[tau]["graph_selected_rate"]
+        for tau in [0.0, 0.05, 0.10, 0.15, 0.20]
+    ]
+    for j in range(len(graph_fractions) - 1):
+        assert graph_fractions[j] >= graph_fractions[j + 1]
