@@ -93,7 +93,7 @@ def test_topological_feature_keys_and_finite_invariants():
 
 
 def test_topological_features_on_empty_and_trivial_subgraphs():
-    """Verify safe fallback on degenerate or minimal candidate subgraphs."""
+    """Verify handling of degenerate or minimal candidate subgraphs."""
     # Trivial 1-node subgraph with no edges
     trivial_subgraph = CandidateSubgraphData(
         num_nodes=1,

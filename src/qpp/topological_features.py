@@ -10,6 +10,10 @@ import numpy as np
 from src.eval.retrieval_metrics import compute_access_gini, compute_ppr_entropy
 from src.graph.ppr_retriever import CandidateSubgraphData
 
+# Domain-agnostic node feature schema column constants (ADR-0003)
+COL_QUERY_SIM: int = 0
+COL_IS_PASSAGE: int = 9
+
 
 def extract_topological_features(
     candidate_subgraph: CandidateSubgraphData,
@@ -107,14 +111,13 @@ def extract_topological_features(
     core_numbers = nx.core_number(g) if g.number_of_nodes() > 0 else {}
     max_k_core = float(max(core_numbers.values())) if core_numbers else 0.0
 
-    # 8. Shallow PPR entropy & 9. Deep PPR entropy & 10. Drift
+    # 8. Shallow PPR entropy & 9. Deep PPR entropy & 10. Drift (consistent Candidate Subgraph divergence)
     ppr_shallow_entropy = compute_ppr_entropy(candidate_subgraph.ppr_shallow)
     ppr_deep_entropy = compute_ppr_entropy(candidate_subgraph.ppr_deep)
-    ppr_entropy_drift = float(candidate_subgraph.ppr_entropy_drift)
+    ppr_entropy_drift = float(ppr_deep_entropy - ppr_shallow_entropy)
 
     # 11-13. Directional Distance Encoding statistics to candidate passages
-    # Column 9 of node_features is is_p indicator
-    is_p_mask = candidate_subgraph.node_features[:, 9] > 0.5
+    is_p_mask = candidate_subgraph.node_features[:, COL_IS_PASSAGE] > 0.5
     if np.any(is_p_mask):
         p_dde = dde[is_p_mask]
         dde_passage_mean = float(np.mean(p_dde))
@@ -127,7 +130,7 @@ def extract_topological_features(
 
     # 14. Anti-homophily bridge score (Issue #1 User Story 14)
     # Reflects disparity between high seed query similarity and low passage query similarity
-    query_sims = candidate_subgraph.node_features[:, 0]
+    query_sims = candidate_subgraph.node_features[:, COL_QUERY_SIM]
     if len(seed_indices) > 0 and np.any(is_p_mask):
         seed_sim_mean = float(np.mean(query_sims[seed_indices]))
         passage_sim_mean = float(np.mean(query_sims[is_p_mask]))

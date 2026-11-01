@@ -20,7 +20,15 @@ from src.eval.retrieval_metrics import (
 from src.graph.ppr_retriever import CandidateSubgraphData, PPRRetriever
 from src.graph.trigraph_builder import CleanupStage, TriGraphBuilder
 from src.qpp.classical import compute_classical_qpp
-from src.qpp.tabular_router import TabularCVResult, evaluate_in_domain_cv
+from src.qpp.tabular_router import (
+    DisagreementMatrix,
+    TabularCVResult,
+    TopologicalLightGBMRouter,
+    TransferResult,
+    evaluate_in_domain_cv,
+    evaluate_router_disagreement_sweep,
+    evaluate_zero_shot_transfer,
+)
 from src.qpp.topological_features import extract_topological_features
 
 
@@ -183,6 +191,8 @@ class StudyReport:
         random_state: int = 42,
     ) -> TabularCVResult:
         """Train and cross-validate Topological LightGBM Post-Retrieval Context Selector."""
+        if target not in ("semantic", "lexical"):
+            raise ValueError(f"Invalid target: '{target}'. Expected 'semantic' or 'lexical'.")
         X, y_lex, y_sem, names = self.extract_topological_features()
         y = y_sem if target == "semantic" else y_lex
         sweep = tau_sweep or self.config.gain_margin_thresholds
@@ -193,6 +203,72 @@ class StudyReport:
             tau_sweep=sweep,
             random_state=random_state,
             router_kwargs={"feature_names": names, "random_state": random_state},
+        )
+
+    def evaluate_dual_routers(
+        self,
+        n_splits: int = 5,
+        tau_sweep: list[float] | None = None,
+        random_state: int = 42,
+    ) -> dict[str, Any]:
+        """Train separate Lexical and Semantic routers, returning CV results and router disagreement sweep (Issue #4)."""
+        X, y_lex, y_sem, names = self.extract_topological_features()
+        sweep = tau_sweep or self.config.gain_margin_thresholds
+
+        lexical_cv = evaluate_in_domain_cv(
+            X=X,
+            y=y_lex,
+            n_splits=n_splits,
+            tau_sweep=sweep,
+            random_state=random_state,
+            router_kwargs={"feature_names": names, "random_state": random_state},
+        )
+        semantic_cv = evaluate_in_domain_cv(
+            X=X,
+            y=y_sem,
+            n_splits=n_splits,
+            tau_sweep=sweep,
+            random_state=random_state,
+            router_kwargs={"feature_names": names, "random_state": random_state},
+        )
+
+        disagreement_sweep = evaluate_router_disagreement_sweep(
+            lexical_preds=lexical_cv.out_of_fold_predictions,
+            semantic_preds=semantic_cv.out_of_fold_predictions,
+            tau_sweep=sweep,
+        )
+
+        return {
+            "lexical_cv": lexical_cv,
+            "semantic_cv": semantic_cv,
+            "disagreement_sweep": disagreement_sweep,
+        }
+
+    def evaluate_zero_shot_transfer(
+        self,
+        target_report: StudyReport,
+        target: str = "semantic",
+        tau_sweep: list[float] | None = None,
+        random_state: int = 42,
+    ) -> TransferResult:
+        """Evaluate Zero-Shot Topological Transfer from this study to another benchmark (GLOSSARY.md)."""
+        if target not in ("semantic", "lexical"):
+            raise ValueError(f"Invalid target: '{target}'. Expected 'semantic' or 'lexical'.")
+        X_train, y_lex_train, y_sem_train, names = self.extract_topological_features()
+        X_test, y_lex_test, y_sem_test, _ = target_report.extract_topological_features()
+
+        y_train = y_sem_train if target == "semantic" else y_lex_train
+        y_test = y_sem_test if target == "semantic" else y_lex_test
+        sweep = tau_sweep or self.config.gain_margin_thresholds
+
+        router = TopologicalLightGBMRouter(feature_names=names, random_state=random_state)
+        router.fit(X_train, y_train)
+
+        return evaluate_zero_shot_transfer(
+            router=router,
+            X_target=X_test,
+            y_target=y_test,
+            tau_sweep=sweep,
         )
 
 

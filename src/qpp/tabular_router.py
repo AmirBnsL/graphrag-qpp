@@ -4,12 +4,43 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+import warnings
 
 import lightgbm as lgb
 import numpy as np
 from scipy import stats
 from sklearn.metrics import cohen_kappa_score, mean_absolute_error, mean_squared_error, roc_auc_score
 from sklearn.model_selection import KFold
+
+
+@dataclass
+class DisagreementMatrix:
+    """Pairwise decision cross-tabulation and inter-router agreement metrics (Issue #4)."""
+
+    tau: float
+    both_flat_count: int
+    both_graph_count: int
+    lexical_graph_semantic_flat_count: int
+    lexical_flat_semantic_graph_count: int
+    agreement_count: int
+    disagreement_count: int
+    agreement_rate: float
+    disagreement_rate: float
+    cohen_kappa: float
+    sample_count: int
+
+
+@dataclass
+class TransferResult:
+    """Consolidated evaluation of Zero-Shot Topological Transfer on an unseen benchmark (GLOSSARY.md)."""
+
+    predictions: np.ndarray
+    true_gains: np.ndarray
+    spearman_rho: float
+    spearman_pvalue: float
+    mse: float
+    mae: float
+    tau_sweep_results: dict[float, dict[str, float]] = field(default_factory=dict)
 
 
 @dataclass
@@ -101,49 +132,57 @@ def evaluate_conservative_abstention_sweep(
     if tau_sweep is None:
         tau_sweep = [0.0, 0.05, 0.10, 0.15, 0.20]
 
-    y_p = np.asarray(y_pred, dtype=np.float32)
-    y_t = np.asarray(y_true, dtype=np.float32)
-    n = len(y_p)
+    y_pred_arr = np.asarray(y_pred, dtype=np.float32)
+    y_true_arr = np.asarray(y_true, dtype=np.float32)
+    n = len(y_pred_arr)
     if n == 0:
         return {}
 
     results: dict[float, dict[str, float]] = {}
 
     for tau in tau_sweep:
-        decisions = (y_p >= tau).astype(int)
-        binary_ground_truth = (y_t >= tau).astype(int)
+        decisions = (y_pred_arr >= tau).astype(int)
+        binary_ground_truth = (y_true_arr >= tau).astype(int)
 
         graph_count = int(np.sum(decisions == 1))
         flat_count = int(np.sum(decisions == 0))
         graph_rate = float(graph_count / n)
 
+        # Ternary label counts (User Story 17, GLOSSARY.md)
+        positive_count = int(np.sum(y_true_arr >= tau))
+        negative_count = int(np.sum(y_true_arr <= -tau))
+        neutral_count = int(np.sum(np.abs(y_true_arr) < tau))
+
         # Achieved gain under Conservative Graph Abstention:
-        # If Graph selected: achieve y_true. If Flat selected: achieve 0.0 (baseline fallback).
-        achieved_gains = np.where(decisions == 1, y_t, 0.0)
+        # If Graph selected: achieve y_true. If Flat selected: achieve 0.0 (baseline default selection).
+        achieved_gains = np.where(decisions == 1, y_true_arr, 0.0)
         mean_achieved_gain = float(np.mean(achieved_gains))
 
         # Oracle gain: select Graph whenever y_true >= tau
-        oracle_gains = np.where(y_t >= tau, y_t, 0.0)
+        oracle_gains = np.where(y_true_arr >= tau, y_true_arr, 0.0)
         mean_oracle_gain = float(np.mean(oracle_gains))
 
         mean_flat_gain = 0.0
-        mean_graph_gain = float(np.mean(y_t))
+        mean_graph_gain = float(np.mean(y_true_arr))
         accuracy = float(np.mean(decisions == binary_ground_truth))
 
-        # ROC-AUC if both positive and negative classes exist
+        # ROC-AUC if both positive and negative classes exist in ground truth
         if len(np.unique(binary_ground_truth)) > 1:
             try:
-                auc = float(roc_auc_score(binary_ground_truth, y_p))
+                auc = float(roc_auc_score(binary_ground_truth, y_pred_arr))
             except Exception:
-                auc = 0.5
+                auc = float("nan")
         else:
-            auc = 1.0
+            auc = float("nan")
 
         results[tau] = {
             "tau": tau,
-            "graph_selected_count": graph_count,
-            "flat_selected_count": flat_count,
+            "graph_selected_count": float(graph_count),
+            "flat_selected_count": float(flat_count),
             "graph_selected_rate": graph_rate,
+            "positive_count": float(positive_count),
+            "negative_count": float(negative_count),
+            "neutral_count": float(neutral_count),
             "mean_achieved_gain": mean_achieved_gain,
             "mean_oracle_gain": mean_oracle_gain,
             "mean_flat_gain": mean_flat_gain,
@@ -153,6 +192,24 @@ def evaluate_conservative_abstention_sweep(
         }
 
     return results
+
+
+def _compute_gain_regression_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+) -> tuple[float, float, float, float]:
+    """Compute Spearman rho, p-value, MSE, and MAE between true and predicted gains."""
+    # Handle constant arrays cleanly without raising scipy warnings
+    if len(y_true) < 2 or np.all(y_true == y_true[0]) or np.all(y_pred == y_pred[0]):
+        rho, pval = 0.0, 1.0
+    else:
+        rho, pval = stats.spearmanr(y_pred, y_true)
+        if np.isnan(rho):
+            rho, pval = 0.0, 1.0
+
+    mse = float(mean_squared_error(y_true, y_pred))
+    mae = float(mean_absolute_error(y_true, y_pred))
+    return float(rho), float(pval), mse, mae
 
 
 def evaluate_in_domain_cv(
@@ -184,13 +241,7 @@ def evaluate_in_domain_cv(
         router.fit(X_train, y_train)
         oof_predictions[val_idx] = router.predict(X_val)
 
-    # Compute correlation and error metrics
-    rho, pval = stats.spearmanr(oof_predictions, y_arr)
-    if np.isnan(rho):
-        rho, pval = 0.0, 1.0
-
-    mse = float(mean_squared_error(y_arr, oof_predictions))
-    mae = float(mean_absolute_error(y_arr, oof_predictions))
+    rho, pval, mse, mae = _compute_gain_regression_metrics(y_arr, oof_predictions)
 
     sweep_results = evaluate_conservative_abstention_sweep(
         y_pred=oof_predictions,
@@ -201,8 +252,8 @@ def evaluate_in_domain_cv(
     return TabularCVResult(
         out_of_fold_predictions=oof_predictions,
         true_gains=y_arr,
-        spearman_rho=float(rho),
-        spearman_pvalue=float(pval),
+        spearman_rho=rho,
+        spearman_pvalue=pval,
         mse=mse,
         mae=mae,
         tau_sweep_results=sweep_results,
@@ -214,42 +265,38 @@ def evaluate_zero_shot_transfer(
     X_target: np.ndarray,
     y_target: np.ndarray,
     tau_sweep: list[float] | None = None,
-) -> dict[str, Any]:
+) -> TransferResult:
     """Evaluate Zero-Shot Topological Transfer on an unseen benchmark (GLOSSARY.md, Issue #4)."""
     if tau_sweep is None:
         tau_sweep = [0.0, 0.05, 0.10, 0.15, 0.20]
 
-    y_p = router.predict(X_target)
-    y_t = np.asarray(y_target, dtype=np.float32)
+    y_pred_arr = router.predict(X_target)
+    y_true_arr = np.asarray(y_target, dtype=np.float32)
 
-    rho, pval = stats.spearmanr(y_p, y_t)
-    if np.isnan(rho):
-        rho, pval = 0.0, 1.0
-
-    mse = float(mean_squared_error(y_t, y_p))
-    mae = float(mean_absolute_error(y_t, y_p))
+    rho, pval, mse, mae = _compute_gain_regression_metrics(y_true_arr, y_pred_arr)
 
     sweep_results = evaluate_conservative_abstention_sweep(
-        y_pred=y_p,
-        y_true=y_t,
+        y_pred=y_pred_arr,
+        y_true=y_true_arr,
         tau_sweep=tau_sweep,
     )
 
-    return {
-        "predictions": y_p,
-        "true_gains": y_t,
-        "spearman_rho": float(rho),
-        "spearman_pvalue": float(pval),
-        "mse": mse,
-        "mae": mae,
-        "tau_sweep_results": sweep_results,
-    }
+    return TransferResult(
+        predictions=y_pred_arr,
+        true_gains=y_true_arr,
+        spearman_rho=rho,
+        spearman_pvalue=pval,
+        mse=mse,
+        mae=mae,
+        tau_sweep_results=sweep_results,
+    )
 
 
 def compute_router_disagreement(
     lexical_decisions: np.ndarray,
     semantic_decisions: np.ndarray,
-) -> dict[str, Any]:
+    tau: float = 0.10,
+) -> DisagreementMatrix:
     """Compute router disagreement matrix and Cohen's kappa between Lexical and Semantic routers."""
     lex = np.asarray(lexical_decisions, dtype=int)
     sem = np.asarray(semantic_decisions, dtype=int)
@@ -266,22 +313,50 @@ def compute_router_disagreement(
     agreement_rate = float(agreement_count / n)
     disagreement_rate = float(1.0 - agreement_rate)
 
-    try:
-        kappa = float(cohen_kappa_score(lex, sem))
-        if np.isnan(kappa):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            kappa = float(cohen_kappa_score(lex, sem, labels=[0, 1]))
+            if np.isnan(kappa):
+                kappa = 1.0 if agreement_rate == 1.0 else 0.0
+        except Exception:
             kappa = 1.0 if agreement_rate == 1.0 else 0.0
-    except Exception:
-        kappa = 1.0 if agreement_rate == 1.0 else 0.0
 
-    return {
-        "both_flat_count": both_flat,
-        "both_graph_count": both_graph,
-        "lexical_graph_semantic_flat_count": lex_graph_sem_flat,
-        "lexical_flat_semantic_graph_count": lex_flat_sem_graph,
-        "agreement_count": agreement_count,
-        "disagreement_count": n - agreement_count,
-        "agreement_rate": agreement_rate,
-        "disagreement_rate": disagreement_rate,
-        "cohen_kappa": kappa,
-        "sample_count": n,
-    }
+    return DisagreementMatrix(
+        tau=tau,
+        both_flat_count=both_flat,
+        both_graph_count=both_graph,
+        lexical_graph_semantic_flat_count=lex_graph_sem_flat,
+        lexical_flat_semantic_graph_count=lex_flat_sem_graph,
+        agreement_count=agreement_count,
+        disagreement_count=n - agreement_count,
+        agreement_rate=agreement_rate,
+        disagreement_rate=disagreement_rate,
+        cohen_kappa=kappa,
+        sample_count=n,
+    )
+
+
+def evaluate_router_disagreement_sweep(
+    lexical_preds: np.ndarray,
+    semantic_preds: np.ndarray,
+    tau_sweep: list[float] | None = None,
+) -> dict[float, DisagreementMatrix]:
+    """Evaluate router disagreement matrix across Gain Margin Threshold sweep tau."""
+    if tau_sweep is None:
+        tau_sweep = [0.0, 0.05, 0.10, 0.15, 0.20]
+
+    lex_p = np.asarray(lexical_preds, dtype=np.float32)
+    sem_p = np.asarray(semantic_preds, dtype=np.float32)
+
+    sweep_results: dict[float, DisagreementMatrix] = {}
+    for tau in tau_sweep:
+        lex_decisions = (lex_p >= tau).astype(int)
+        sem_decisions = (sem_p >= tau).astype(int)
+        sweep_results[tau] = compute_router_disagreement(
+            lexical_decisions=lex_decisions,
+            semantic_decisions=sem_decisions,
+            tau=tau,
+        )
+
+    return sweep_results
