@@ -20,6 +20,12 @@ from src.eval.retrieval_metrics import (
 from src.graph.ppr_retriever import CandidateSubgraphData, PPRRetriever
 from src.graph.trigraph_builder import CleanupStage, TriGraphBuilder
 from src.qpp.classical import compute_classical_qpp
+from src.qpp.gnn_router import (
+    TopologicalGNNRouter,
+    candidate_subgraph_to_pyg_data,
+    evaluate_gnn_in_domain_cv,
+    evaluate_gnn_zero_shot_transfer,
+)
 from src.qpp.tabular_router import (
     DisagreementMatrix,
     TabularCVResult,
@@ -269,6 +275,38 @@ class StudyReport:
             X_target=X_test,
             y_target=y_test,
             tau_sweep=sweep,
+        )
+
+    def evaluate_topological_gnn(
+        self,
+        target: str = "semantic",
+        n_splits: int = 5,
+        tau_sweep: list[float] | None = None,
+        epochs: int = 20,
+        lr: float = 0.01,
+        random_state: int = 42,
+    ) -> TabularCVResult:
+        """Train and cross-validate 2-layer GATv2 Post-Retrieval Context Selector (ADR-0003, Issue #5)."""
+        if target not in ("semantic", "lexical"):
+            raise ValueError(f"Invalid target: '{target}'. Expected 'semantic' or 'lexical'.")
+        sweep = tau_sweep or self.config.gain_margin_thresholds
+
+        graphs: list[Any] = []
+        targets: list[float] = []
+        for res in self.query_results.values():
+            y = res.semantic_gain if target == "semantic" else res.lexical_gain
+            pyg_data = candidate_subgraph_to_pyg_data(res.candidate_subgraph, label=y)
+            graphs.append(pyg_data)
+            targets.append(y)
+
+        return evaluate_gnn_in_domain_cv(
+            graphs=graphs,
+            targets=np.array(targets, dtype=np.float32),
+            n_splits=n_splits,
+            tau_sweep=sweep,
+            epochs=epochs,
+            lr=lr,
+            random_state=random_state,
         )
 
 
