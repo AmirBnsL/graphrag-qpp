@@ -75,3 +75,11 @@ def compute_ppr_entropy(p: np.ndarray | list[float]) -> float:
         return 0.0
     prob = pos / s
     return float(-np.sum(prob * np.log2(prob)))
+
+
+def compute_ppr_entropy_drift(
+    p_deep: np.ndarray | list[float],
+    p_shallow: np.ndarray | list[float],
+) -> float:
+    """Compute PPR Diffusion Drift: Shannon entropy divergence ΔH_PPR = H(p_deep) - H(p_shallow) (GLOSSARY.md, ADR-0006)."""
+    return float(compute_ppr_entropy(p_deep) - compute_ppr_entropy(p_shallow))

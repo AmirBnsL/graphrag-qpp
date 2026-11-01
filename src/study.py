@@ -274,6 +274,7 @@ class StageResult:
     mean_recall: float
     mean_access_gini: float
     mean_ppr_entropy: float
+    mean_ppr_entropy_drift: float
     per_query_results: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -290,7 +291,7 @@ def evaluate_cleanup_ablation(
     config: StudyConfig,
     embedder: BaseEmbedder,
 ) -> CleanupAblationReport:
-    """Evaluate 4-stage cleanup ablation on retrieval metrics without LLM calls (ADR-0005, Issue #3).
+    """Evaluate 4-stage cleanup ablation on retrieval metrics without LLM calls (ADR-0006, Issue #3).
 
     Evaluates:
       Stage 0 (RAW_PERSISTENT): Unconstrained persistent graph, uniform weights.
@@ -317,6 +318,7 @@ def evaluate_cleanup_ablation(
         recalls: list[float] = []
         ginis: list[float] = []
         entropies: list[float] = []
+        drifts: list[float] = []
         per_query: list[dict[str, Any]] = []
 
         for sample in samples:
@@ -344,11 +346,13 @@ def evaluate_cleanup_ablation(
             # Hub Access Gini: Gini coefficient measuring access concentration across active candidate nodes (Song & Cai, 2026)
             gini = compute_access_gini(cand_subgraph.ppr_deep, only_positive=True)
             ent = compute_ppr_entropy(cand_subgraph.ppr_deep)
+            drift = cand_subgraph.ppr_entropy_drift
 
             precisions.append(prec)
             recalls.append(rec)
             ginis.append(gini)
             entropies.append(ent)
+            drifts.append(drift)
 
             per_query.append(
                 {
@@ -357,6 +361,7 @@ def evaluate_cleanup_ablation(
                     "recall": rec,
                     "access_gini": gini,
                     "ppr_entropy": ent,
+                    "ppr_entropy_drift": drift,
                     "retrieved_ids": retrieved_ids,
                 }
             )
@@ -367,6 +372,7 @@ def evaluate_cleanup_ablation(
             mean_recall=float(np.mean(recalls)) if recalls else 0.0,
             mean_access_gini=float(np.mean(ginis)) if ginis else 0.0,
             mean_ppr_entropy=float(np.mean(entropies)) if entropies else 0.0,
+            mean_ppr_entropy_drift=float(np.mean(drifts)) if drifts else 0.0,
             per_query_results=per_query,
         )
 

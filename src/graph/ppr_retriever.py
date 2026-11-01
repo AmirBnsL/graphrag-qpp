@@ -9,7 +9,8 @@ from typing import Any
 import numpy as np
 from scipy import sparse
 
-from src.graph.trigraph_builder import TriGraph
+from src.eval.retrieval_metrics import compute_ppr_entropy, compute_ppr_entropy_drift
+from src.graph.trigraph_builder import CleanupStage, TriGraph
 
 
 @dataclass
@@ -25,12 +26,6 @@ class CandidateSubgraphData:
     ppr_entropy_drift: float   # Scalar Shannon entropy drift: H(p_deep) - H(p_shallow)
     directional_distance_encoding: np.ndarray  # Shape: [N]
     node_labels: list[str]
-
-
-def _shannon_entropy(p: np.ndarray) -> float:
-    """Compute Shannon entropy of probability distribution."""
-    pos = p[p > 0]
-    return float(-np.sum(pos * np.log2(pos))) if len(pos) > 0 else 0.0
 
 
 def _power_iteration_ppr(
@@ -123,8 +118,11 @@ class PPRRetriever:
                     global_idx = e_indices[rel_idx]
                     seed_entity_nodes.append(global_idx)
                     d = max(deg[global_idx], 1.0)
-                    # Degree penalty (inverse log degree)
-                    p0[global_idx] = sc / np.log1p(d)
+                    # Degree penalty (inverse log degree) applied in Step 2+ (ADR-0006, Issue #3)
+                    if graph.cleanup_stage >= CleanupStage.IDF_DEGREE_DAMPENING:
+                        p0[global_idx] = sc / np.log1p(d)
+                    else:
+                        p0[global_idx] = sc
 
         # Passage seeds: top-3 passages by cosine similarity
         p_indices = graph.passage_indices
@@ -212,7 +210,7 @@ class PPRRetriever:
         sub_p_shallow = p_shallow[subgraph_nodes].reshape(-1, 1)
         sub_p_deep = p_deep[subgraph_nodes].reshape(-1, 1)
         sub_drift = p_drift[subgraph_nodes].reshape(-1, 1)
-        entropy_drift = _shannon_entropy(p_deep) - _shannon_entropy(p_shallow)
+        entropy_drift = compute_ppr_entropy_drift(p_deep, p_shallow)
 
         sub_deg = np.log1p(np.array(sub_adj.sum(axis=1))).reshape(-1, 1)
         global_deg = np.log1p(np.array(adj[subgraph_nodes, :].sum(axis=1))).reshape(-1, 1)

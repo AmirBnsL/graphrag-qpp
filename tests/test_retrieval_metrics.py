@@ -8,6 +8,7 @@ import pytest
 from src.eval.retrieval_metrics import (
     compute_access_gini,
     compute_ppr_entropy,
+    compute_ppr_entropy_drift,
     compute_precision_at_k,
     compute_recall_at_k,
 )
@@ -63,3 +64,10 @@ def test_ppr_entropy():
 
     # Empty
     assert compute_ppr_entropy([]) == 0.0
+
+
+def test_ppr_entropy_drift():
+    # Shallow concentrated (1.0 bits) vs deep diffused (2.0 bits) -> drift = +1.0 bit
+    p_shallow = np.array([0.5, 0.5, 0.0, 0.0])
+    p_deep = np.array([0.25, 0.25, 0.25, 0.25])
+    assert pytest.approx(compute_ppr_entropy_drift(p_deep, p_shallow), abs=1e-5) == 1.0

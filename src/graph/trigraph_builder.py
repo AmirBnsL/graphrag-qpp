@@ -64,6 +64,20 @@ class TriGraph:
     cleanup_stage: CleanupStage = CleanupStage.SESSION_CONTEXT_CONSTRAINED
 
 
+DEFAULT_SESSION_SIMILARITY_THRESHOLD: float = 0.65
+
+
+def _lemmatize_token(token: str) -> str:
+    """Rule-based lemmatization for common noun inflections (Issue #3)."""
+    if token.endswith("ies") and len(token) > 4:
+        return token[:-3] + "y"
+    if token.endswith("sses") or token.endswith("shes") or token.endswith("ches") or token.endswith("xes") or token.endswith("zes"):
+        return token[:-2]
+    if token.endswith("s") and not token.endswith("ss") and len(token) > 3:
+        return token[:-1]
+    return token
+
+
 def extract_entities_rule_based(
     text: str,
     stage: CleanupStage = CleanupStage.RAW_PERSISTENT,
@@ -71,11 +85,12 @@ def extract_entities_rule_based(
     """Extract named entities and salient nouns via rules, POS/lemmatization, and stage filters."""
     tokens = re.findall(r"\b[A-Z][a-zA-Z0-9_]{2,}\b", text)
     if stage >= CleanupStage.LEXICAL_NORMALIZATION:
-        filtered = [
-            t for t in tokens
-            if t.lower() not in CONVERSATIONAL_STOPLIST and len(t) >= 3
-        ]
-        return list(dict.fromkeys(filtered))
+        lemmatized: list[str] = []
+        for t in tokens:
+            t_clean = _lemmatize_token(t)
+            if t_clean.lower() not in CONVERSATIONAL_STOPLIST and len(t_clean) >= 3:
+                lemmatized.append(t_clean)
+        return list(dict.fromkeys(lemmatized))
     return list(dict.fromkeys(tokens))
 
 
@@ -86,9 +101,11 @@ class TriGraphBuilder:
         self,
         embedder: BaseEmbedder,
         synonym_threshold: float = 0.85,
+        session_similarity_threshold: float = DEFAULT_SESSION_SIMILARITY_THRESHOLD,
     ) -> None:
         self.embedder = embedder
         self.synonym_threshold = synonym_threshold
+        self.session_similarity_threshold = session_similarity_threshold
 
     def build(
         self,
@@ -96,6 +113,7 @@ class TriGraphBuilder:
         stage: CleanupStage = CleanupStage.RAW_PERSISTENT,
     ) -> TriGraph:
         """Construct TriGraph from a corpus of passages under a specific cleanup stage."""
+        passage_sessions: dict[int, str] = {}
         all_sentences: list[str] = []
         passage_to_sents: dict[int, list[int]] = {}
         all_entities: list[str] = []
@@ -116,6 +134,7 @@ class TriGraphBuilder:
                 clean_sents = [p.get("text", "")]
 
             sess_id = str(p.get("session_id") or "default_session")
+            passage_sessions[p_idx] = sess_id
 
             p_sent_indices: list[int] = []
             for s in clean_sents:
@@ -123,37 +142,19 @@ class TriGraphBuilder:
                 all_sentences.append(s)
                 p_sent_indices.append(s_idx)
 
-                # Extract entities from sentence according to stage
+                # Extract entities from sentence according to stage (canonical names preserved)
                 ents = extract_entities_rule_based(s, stage=stage)
                 e_indices: list[int] = []
                 for ent in ents:
-                    # Session-scoping logic under Step 3 (SESSION_CONTEXT_CONSTRAINED)
-                    ent_key = ent
-                    if stage == CleanupStage.SESSION_CONTEXT_CONSTRAINED:
-                        if ent in entity_map:
-                            prev_e_idx = entity_map[ent]
-                            prev_sessions = ent_to_sessions.get(prev_e_idx, set())
-                            if sess_id not in prev_sessions:
-                                # Check session-level context similarity between passages
-                                prev_p_indices = ent_to_passages.get(prev_e_idx, [])
-                                max_sim = 0.0
-                                if prev_p_indices and len(p_embeds) > p_idx:
-                                    sims = [float(np.dot(p_embeds[p_idx], p_embeds[prev_p])) for prev_p in prev_p_indices]
-                                    max_sim = max(sims) if sims else 0.0
-
-                                # If session contexts are unrelated (< 0.65 similarity), scope by session
-                                if max_sim < 0.65:
-                                    ent_key = f"{sess_id}:{ent}"
-
-                    if ent_key not in entity_map:
+                    if ent not in entity_map:
                         e_idx = len(all_entities)
-                        entity_map[ent_key] = e_idx
-                        all_entities.append(ent_key)
+                        entity_map[ent] = e_idx
+                        all_entities.append(ent)
                         ent_to_sents[e_idx] = []
                         ent_to_passages[e_idx] = []
                         ent_to_sessions[e_idx] = set()
                     else:
-                        e_idx = entity_map[ent_key]
+                        e_idx = entity_map[ent]
 
                     e_indices.append(e_idx)
                     ent_to_sents[e_idx].append(s_idx)
@@ -174,9 +175,16 @@ class TriGraphBuilder:
         s_offset = num_passages
         e_offset = num_passages + num_sents
 
-        # Compute embeddings for all nodes
-        all_texts = passage_texts + all_sentences + all_entities
-        node_embeddings = self.embedder.embed_texts(all_texts)
+        # Compute embeddings for non-passage nodes and concatenate without redundant passage embedding
+        remaining_texts = all_sentences + all_entities
+        if remaining_texts:
+            remaining_embeds = self.embedder.embed_texts(remaining_texts)
+            if len(p_embeds) > 0:
+                node_embeddings = np.concatenate([p_embeds, remaining_embeds], axis=0)
+            else:
+                node_embeddings = remaining_embeds
+        else:
+            node_embeddings = p_embeds
 
         # Build sparse adjacency matrix
         rows: list[int] = []
@@ -190,6 +198,24 @@ class TriGraphBuilder:
             rows.append(v)
             cols.append(u)
             data.append(w)
+
+        def should_gate_edge(p_index: int, e_index: int) -> bool:
+            """Cross-session context-similarity edge gating (ADR-0006, Issue #3)."""
+            if stage != CleanupStage.SESSION_CONTEXT_CONSTRAINED:
+                return False
+            sess = passage_sessions[p_index]
+            other_sessions = ent_to_sessions[e_index] - {sess}
+            if not other_sessions:
+                return False
+            other_p_indices = [
+                prev_p for prev_p in ent_to_passages[e_index]
+                if passage_sessions[prev_p] in other_sessions
+            ]
+            if not other_p_indices or len(p_embeds) <= p_index:
+                return False
+            sims = [float(np.dot(p_embeds[p_index], p_embeds[other_p])) for other_p in other_p_indices]
+            max_sim = max(sims) if sims else 0.0
+            return max_sim < self.session_similarity_threshold
 
         # Compute entity IDF weights for Step 2+
         ent_idf_weights: dict[int, float] = {}
@@ -216,26 +242,37 @@ class TriGraphBuilder:
                 for e_idx in sent_to_ents.get(s_idx, []):
                     if e_idx not in seen_ents:
                         seen_ents.add(e_idx)
+                        if should_gate_edge(p_idx, e_idx):
+                            continue
                         v = e_offset + e_idx
                         w = ent_idf_weights.get(e_idx, 1.0)
                         add_edge(u, v, w)
 
         # 3. Sentence <-> Entity containment edges
-        for s_idx, e_indices in sent_to_ents.items():
-            u = s_offset + s_idx
-            for e_idx in e_indices:
-                v = e_offset + e_idx
-                w = ent_idf_weights.get(e_idx, 1.0)
-                add_edge(u, v, w)
+        for p_idx, s_indices in passage_to_sents.items():
+            for s_idx in s_indices:
+                u = s_offset + s_idx
+                for e_idx in sent_to_ents.get(s_idx, []):
+                    if should_gate_edge(p_idx, e_idx):
+                        continue
+                    v = e_offset + e_idx
+                    w = ent_idf_weights.get(e_idx, 1.0)
+                    add_edge(u, v, w)
 
         # 4. Entity <-> Entity intra-sentence co-occurrence
-        for s_idx, e_indices in sent_to_ents.items():
-            for i in range(len(e_indices)):
-                for j in range(i + 1, len(e_indices)):
-                    u = e_offset + e_indices[i]
-                    v = e_offset + e_indices[j]
-                    w_co = min(ent_idf_weights.get(e_indices[i], 1.0), ent_idf_weights.get(e_indices[j], 1.0))
-                    add_edge(u, v, w_co)
+        for p_idx, s_indices in passage_to_sents.items():
+            for s_idx in s_indices:
+                e_indices = sent_to_ents.get(s_idx, [])
+                for i in range(len(e_indices)):
+                    if should_gate_edge(p_idx, e_indices[i]):
+                        continue
+                    for j in range(i + 1, len(e_indices)):
+                        if should_gate_edge(p_idx, e_indices[j]):
+                            continue
+                        u = e_offset + e_indices[i]
+                        v = e_offset + e_indices[j]
+                        w_co = min(ent_idf_weights.get(e_indices[i], 1.0), ent_idf_weights.get(e_indices[j], 1.0))
+                        add_edge(u, v, w_co)
 
         # 5. Entity <-> Entity synonymy edges based on cosine similarity
         if num_ents > 1:
@@ -245,6 +282,21 @@ class TriGraphBuilder:
                 for j in range(i + 1, num_ents):
                     sim = float(sim_matrix[i, j])
                     if sim >= self.synonym_threshold:
+                        if stage == CleanupStage.SESSION_CONTEXT_CONSTRAINED:
+                            sessions_i = ent_to_sessions.get(i, set())
+                            sessions_j = ent_to_sessions.get(j, set())
+                            if not (sessions_i & sessions_j):
+                                p_i_list = ent_to_passages.get(i, [])
+                                p_j_list = ent_to_passages.get(j, [])
+                                max_p_sim = 0.0
+                                for pi in p_i_list:
+                                    for pj in p_j_list:
+                                        if len(p_embeds) > max(pi, pj):
+                                            psim = float(np.dot(p_embeds[pi], p_embeds[pj]))
+                                            if psim > max_p_sim:
+                                                max_p_sim = psim
+                                if max_p_sim < self.session_similarity_threshold:
+                                    continue
                         u = e_offset + i
                         v = e_offset + j
                         w_syn = sim * min(ent_idf_weights.get(i, 1.0), ent_idf_weights.get(j, 1.0))

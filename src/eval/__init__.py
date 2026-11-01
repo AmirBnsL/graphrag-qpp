@@ -3,6 +3,7 @@
 from src.eval.retrieval_metrics import (
     compute_access_gini,
     compute_ppr_entropy,
+    compute_ppr_entropy_drift,
     compute_precision_at_k,
     compute_recall_at_k,
 )
@@ -10,6 +11,7 @@ from src.eval.retrieval_metrics import (
 __all__ = [
     "compute_access_gini",
     "compute_ppr_entropy",
+    "compute_ppr_entropy_drift",
     "compute_precision_at_k",
     "compute_recall_at_k",
 ]

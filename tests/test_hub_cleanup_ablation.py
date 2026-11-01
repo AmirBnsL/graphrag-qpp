@@ -95,23 +95,27 @@ def test_four_stage_cleanup_ablation_behavior():
     ]:
         assert stage in ablation_report.stage_results
 
-    s0 = ablation_report.stage_results[CleanupStage.RAW_PERSISTENT]
-    s1 = ablation_report.stage_results[CleanupStage.LEXICAL_NORMALIZATION]
-    s2 = ablation_report.stage_results[CleanupStage.IDF_DEGREE_DAMPENING]
-    s3 = ablation_report.stage_results[CleanupStage.SESSION_CONTEXT_CONSTRAINED]
+    stage0_raw = ablation_report.stage_results[CleanupStage.RAW_PERSISTENT]
+    stage1_lexical = ablation_report.stage_results[CleanupStage.LEXICAL_NORMALIZATION]
+    stage2_idf_damped = ablation_report.stage_results[CleanupStage.IDF_DEGREE_DAMPENING]
+    stage3_session_gated = ablation_report.stage_results[CleanupStage.SESSION_CONTEXT_CONSTRAINED]
 
     # 2. Precision@5 must improve or stay high as hub contamination is cleaned up
     # Step 0 suffers from cross-session hub diffusion into sessions 2 and 3
-    assert s3.mean_precision >= s0.mean_precision
+    assert stage3_session_gated.mean_precision >= stage0_raw.mean_precision
 
     # 3. Hub Access Gini must decrease (indicating more uniform diffusion rather than hub concentration)
-    assert s3.mean_access_gini <= s0.mean_access_gini
+    assert stage3_session_gated.mean_access_gini < stage0_raw.mean_access_gini
 
     # 4. Recall@5 on target evidence should be preserved or improved
-    assert s3.mean_recall >= s0.mean_recall
+    assert stage3_session_gated.mean_recall >= stage0_raw.mean_recall
 
-    # 5. PPR Shannon entropy must decrease (proving suppression of PPR Diffusion Drift)
-    assert s3.mean_ppr_entropy <= s0.mean_ppr_entropy
+    # 5. PPR Shannon entropy must decrease (proving suppression of global hub noise dispersion)
+    assert stage3_session_gated.mean_ppr_entropy < stage0_raw.mean_ppr_entropy
+
+    # 6. PPR Diffusion Drift ΔH_PPR = H(p_deep) - H(p_shallow) is strictly computed and reported (GLOSSARY.md, ADR-0006)
+    assert stage3_session_gated.mean_ppr_entropy_drift > 0.0
+    assert stage0_raw.mean_ppr_entropy_drift > 0.0
 
 
 def test_trigraph_construction_stage_properties():
@@ -122,38 +126,65 @@ def test_trigraph_construction_stage_properties():
         {
             "passage_id": "p1",
             "session_id": "sess_A",
+            "text": "User discussed AlphaProject plans for quarterly execution.",
+            "sentences": ["User discussed AlphaProject plans for quarterly execution."],
+        },
+        {
+            "passage_id": "p2",
+            "session_id": "sess_B",
+            "text": "Assistant discussed AlphaProject cooking recipes with vegetable ingredients.",
+            "sentences": ["Assistant discussed AlphaProject cooking recipes with vegetable ingredients."],
+        },
+    ]
+
+    # Stage 0: Conversational hubs ("User", "Assistant") must be present
+    graph_raw = builder.build(passages, stage=CleanupStage.RAW_PERSISTENT)
+    assert "User" in graph_raw.entities
+    assert "Assistant" in graph_raw.entities
+    assert graph_raw.cleanup_stage == CleanupStage.RAW_PERSISTENT
+
+    # Stage 1: Conversational hubs must be filtered by stop-list
+    graph_lexical = builder.build(passages, stage=CleanupStage.LEXICAL_NORMALIZATION)
+    assert "User" not in graph_lexical.entities
+    assert "Assistant" not in graph_lexical.entities
+    assert "AlphaProject" in graph_lexical.entities
+
+    # Stage 2: Entity IDF weights should be computed and applied to edges
+    graph_idf_damped = builder.build(passages, stage=CleanupStage.IDF_DEGREE_DAMPENING)
+    assert graph_idf_damped.cleanup_stage == CleanupStage.IDF_DEGREE_DAMPENING
+    # Adjacency matrix should exist and be non-empty
+    assert graph_idf_damped.adjacency_matrix.nnz > 0
+
+    # Stage 3: Cross-session context-similarity edge gating gates AlphaProject if sessions A and B are unrelated
+    graph_session_gated = builder.build(passages, stage=CleanupStage.SESSION_CONTEXT_CONSTRAINED)
+    assert graph_session_gated.cleanup_stage == CleanupStage.SESSION_CONTEXT_CONSTRAINED
+    assert "AlphaProject" in graph_session_gated.entities
+    # Unrelated sessions A and B have cross-session AlphaProject edges gated, reducing edge count relative to stage 2
+    assert graph_session_gated.adjacency_matrix.nnz < graph_idf_damped.adjacency_matrix.nnz
+
+
+def test_cross_session_context_similarity_retention():
+    """Verify that when cross-session passages are contextually similar, edges are preserved."""
+    embedder = FakeEmbedder()
+    # When threshold is set very low (-1.0), all sessions are deemed related
+    builder = TriGraphBuilder(embedder=embedder, session_similarity_threshold=-1.0)
+    passages = [
+        {
+            "passage_id": "p1",
+            "session_id": "sess_A",
             "text": "User discussed AlphaProject quarterly plans.",
             "sentences": ["User discussed AlphaProject quarterly plans."],
         },
         {
             "passage_id": "p2",
             "session_id": "sess_B",
-            "text": "User and Assistant discussed AlphaProject budget reviews.",
-            "sentences": ["User and Assistant discussed AlphaProject budget reviews."],
+            "text": "User discussed AlphaProject quarterly plans.",
+            "sentences": ["User discussed AlphaProject quarterly plans."],
         },
     ]
 
-    # Stage 0: Conversational hubs ("User", "Assistant") must be present
-    g0 = builder.build(passages, stage=CleanupStage.RAW_PERSISTENT)
-    assert "User" in g0.entities
-    assert "Assistant" in g0.entities
-    assert g0.cleanup_stage == CleanupStage.RAW_PERSISTENT
-
-    # Stage 1: Conversational hubs must be filtered by stop-list
-    g1 = builder.build(passages, stage=CleanupStage.LEXICAL_NORMALIZATION)
-    assert "User" not in g1.entities
-    assert "Assistant" not in g1.entities
-    assert "AlphaProject" in g1.entities
-
-    # Stage 2: Entity IDF weights should be computed and applied to edges
-    g2 = builder.build(passages, stage=CleanupStage.IDF_DEGREE_DAMPENING)
-    assert g2.cleanup_stage == CleanupStage.IDF_DEGREE_DAMPENING
-    # Adjacency matrix should exist and be non-empty
-    assert g2.adjacency_matrix.nnz > 0
-
-    # Stage 3: Cross-session gating scopes AlphaProject if sessions A and B are unrelated
-    g3 = builder.build(passages, stage=CleanupStage.SESSION_CONTEXT_CONSTRAINED)
-    assert g3.cleanup_stage == CleanupStage.SESSION_CONTEXT_CONSTRAINED
-    # Either scoped or merged depending on context similarity
-    assert len(g3.entities) > 0
+    graph_gated = builder.build(passages, stage=CleanupStage.SESSION_CONTEXT_CONSTRAINED)
+    graph_idf = builder.build(passages, stage=CleanupStage.IDF_DEGREE_DAMPENING)
+    # With related sessions, edges to AlphaProject are kept open in Stage 3
+    assert graph_gated.adjacency_matrix.nnz == graph_idf.adjacency_matrix.nnz
 
