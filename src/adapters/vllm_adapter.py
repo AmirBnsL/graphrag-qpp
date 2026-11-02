@@ -137,15 +137,28 @@ class QuantizedVLLMGeneratorJudge(BaseOracleGeneratorJudge):
 
     def _unload_active_model(self) -> None:
         """Explicitly unload active LLM instance and flush PyTorch CUDA cache."""
-        if self._generator_llm is not None:
-            logger.info("Unloading generator LLM '%s'", self.generator_model)
-            del self._generator_llm
-            self._generator_llm = None
+        for model_attr, name in [("_generator_llm", self.generator_model), ("_judge_llm", self.judge_model)]:
+            llm_obj = getattr(self, model_attr, None)
+            if llm_obj is not None:
+                logger.info("Unloading LLM '%s'", name)
+                if hasattr(llm_obj, "llm_engine") and hasattr(llm_obj.llm_engine, "shutdown"):
+                    try:
+                        llm_obj.llm_engine.shutdown()
+                    except Exception as e:
+                        logger.warning("Error shutting down llm_engine for %s: %s", name, e)
+                setattr(self, model_attr, None)
 
-        if self._judge_llm is not None:
-            logger.info("Unloading judge LLM '%s'", self.judge_model)
-            del self._judge_llm
-            self._judge_llm = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+
+        try:
+            from vllm.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+            destroy_model_parallel()
+            destroy_distributed_environment()
+        except Exception:
+            pass
 
         gc.collect()
         if torch.cuda.is_available():
