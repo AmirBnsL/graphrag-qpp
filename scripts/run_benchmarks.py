@@ -120,8 +120,8 @@ def setup_adapters(mode: str) -> tuple[BaseEmbedder, BaseOracleGeneratorJudge]:
         oracle_judge: BaseOracleGeneratorJudge = QuantizedVLLMGeneratorJudge(
             generator_model="RedHatAI/Qwen3.5-9B-FP8-dynamic",
             judge_model="google/gemma-4-12B-it-qat-w4a16-ct",
-            generator_quantization="fp8",
-            judge_quantization="compressed-tensors",
+            generator_quantization=None,
+            judge_quantization=None,
             gpu_memory_utilization=0.70,
             judge_gpu_memory_utilization=0.80,
             max_model_len=8192,
