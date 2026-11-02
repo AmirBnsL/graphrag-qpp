@@ -1,0 +1,23 @@
+{
+  "total_queries": 49,
+  "mean_lexical_gain": 0.002232133753575146,
+  "mean_semantic_gain": 0.030612244897959183,
+  "mean_access_gini": 0.0,
+  "mean_ppr_entropy_drift": 0.0,
+  "config": {
+    "retrieval_top_k": 5,
+    "cleanup_stage": 3,
+    "gain_margin_thresholds": [
+      0.0,
+      0.05,
+      0.1,
+      0.15,
+      0.2
+    ]
+  },
+  "dataset_counts": {
+    "longmemeval_s": 25,
+    "hotpotqa": 12,
+    "musique": 12
+  }
+}

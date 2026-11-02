@@ -1,0 +1,16 @@
+\begin{table}[t]
+\centering
+\small
+\caption{Cross-Session Hub Contamination Regularization Ablation Across 4 Cleanup Stages.}
+\label{tab:hub_cleanup_ablation}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Cleanup Stage} & \textbf{Hub Access Gini $\downarrow$} & \textbf{Precision@5 $\uparrow$} & \textbf{Recall@5 $\uparrow$} & \textbf{PPR Entropy $\downarrow$} \\
+\midrule
+Step 0 (RAW_PERSISTENT) & 0.710 & 0.280 & 0.700 & 4.816 \\
+Step 1 (LEXICAL_NORMALIZATION) & 0.700 & 0.280 & 0.700 & 4.853 \\
+Step 2 (IDF_DEGREE_DAMPENING) & 0.694 & 0.280 & 0.700 & 4.828 \\
+Step 3 (SESSION_CONTEXT_CONSTRAINED) & 0.694 & 0.280 & 0.700 & 4.828 \\
+\bottomrule
+\end{tabular}
+\end{table}
