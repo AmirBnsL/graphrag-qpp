@@ -6,6 +6,7 @@ import collections
 import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -421,48 +422,75 @@ class ContextSelectionStudy:
             deep_steps=config.ppr_deep_steps,
         )
 
-    def run(self, samples: list[QuerySample]) -> StudyReport:
+    def run(self, samples: list[QuerySample], checkpoint_path: str | Path | None = None) -> StudyReport:
         query_results: dict[str, QueryResult] = {}
         all_qpp: dict[str, list[float]] = collections.defaultdict(list)
-
-        # Step A: Perform retrieval and classical QPP indexing for all samples
-        logger.info("Step A: Batch-embedding %d query questions...", len(samples))
-        all_q_vecs = self.embedder.embed_texts([sample.question for sample in samples])
         intermediate: list[dict[str, Any]] = []
-        for idx, sample in enumerate(samples):
-            if (idx + 1) % 50 == 0 or idx == len(samples) - 1:
-                logger.info("Step A Progress: [%d/%d] queries indexed", idx + 1, len(samples))
-            q_vec = all_q_vecs[idx] if len(all_q_vecs) > idx else self.embedder.embed_texts([sample.question])[0]
-            trigraph = self.builder.build(sample.corpus_passages, stage=self.config.cleanup_stage)
 
-            flat_top = self.retriever.retrieve_flat(
-                query_vec=q_vec,
-                graph=trigraph,
-                top_k=self.config.retrieval_top_k,
-            )
-            graph_top, candidate_subgraph = self.retriever.retrieve_graph(
-                query_vec=q_vec,
-                graph=trigraph,
-                flat_top_passages=flat_top,
-                top_k=self.config.retrieval_top_k,
-            )
-            cqpp = compute_classical_qpp(
-                query=sample.question,
-                flat_passages=flat_top,
-                corpus_passages=sample.corpus_passages,
-                embedder=self.embedder,
-                query_vec=q_vec,
-            )
-            for k, v in cqpp.items():
-                all_qpp[k].append(v)
+        # Check if Step A checkpoint exists
+        loaded_checkpoint = False
+        if checkpoint_path is not None:
+            ckpt = Path(checkpoint_path)
+            if ckpt.exists():
+                try:
+                    import torch
+                    data = torch.load(ckpt, weights_only=False)
+                    if len(data.get("intermediate", [])) == len(samples):
+                        intermediate = data["intermediate"]
+                        all_qpp = collections.defaultdict(list, data.get("all_qpp", {}))
+                        loaded_checkpoint = True
+                        logger.info("Loaded cached Step A checkpoint from %s (%d samples)", ckpt, len(intermediate))
+                except Exception as e:
+                    logger.warning("Failed loading checkpoint %s: %s. Re-running Step A.", ckpt, e)
 
-            intermediate.append({
-                "sample": sample,
-                "flat_top": flat_top,
-                "graph_top": graph_top,
-                "candidate_subgraph": candidate_subgraph,
-                "cqpp": cqpp,
-            })
+        if not loaded_checkpoint:
+            # Step A: Perform retrieval and classical QPP indexing for all samples
+            logger.info("Step A: Batch-embedding %d query questions...", len(samples))
+            all_q_vecs = self.embedder.embed_texts([sample.question for sample in samples])
+            for idx, sample in enumerate(samples):
+                if (idx + 1) % 50 == 0 or idx == len(samples) - 1:
+                    logger.info("Step A Progress: [%d/%d] queries indexed", idx + 1, len(samples))
+                q_vec = all_q_vecs[idx] if len(all_q_vecs) > idx else self.embedder.embed_texts([sample.question])[0]
+                trigraph = self.builder.build(sample.corpus_passages, stage=self.config.cleanup_stage)
+
+                flat_top = self.retriever.retrieve_flat(
+                    query_vec=q_vec,
+                    graph=trigraph,
+                    top_k=self.config.retrieval_top_k,
+                )
+                graph_top, candidate_subgraph = self.retriever.retrieve_graph(
+                    query_vec=q_vec,
+                    graph=trigraph,
+                    flat_top_passages=flat_top,
+                    top_k=self.config.retrieval_top_k,
+                )
+                cqpp = compute_classical_qpp(
+                    query=sample.question,
+                    flat_passages=flat_top,
+                    corpus_passages=sample.corpus_passages,
+                    embedder=self.embedder,
+                    query_vec=q_vec,
+                )
+                for k, v in cqpp.items():
+                    all_qpp[k].append(v)
+
+                intermediate.append({
+                    "sample": sample,
+                    "flat_top": flat_top,
+                    "graph_top": graph_top,
+                    "candidate_subgraph": candidate_subgraph,
+                    "cqpp": cqpp,
+                })
+
+            if checkpoint_path is not None:
+                try:
+                    import torch
+                    ckpt = Path(checkpoint_path)
+                    ckpt.parent.mkdir(parents=True, exist_ok=True)
+                    torch.save({"intermediate": intermediate, "all_qpp": dict(all_qpp)}, ckpt)
+                    logger.info("Saved Step A checkpoint to %s", ckpt)
+                except Exception as e:
+                    logger.warning("Could not save Step A checkpoint: %s", e)
 
         # Free embedder GPU VRAM before loading the generator LLM
         if hasattr(self.embedder, "unload"):
@@ -556,10 +584,11 @@ def run_qpp_study(
     config: StudyConfig,
     embedder: BaseEmbedder,
     oracle_judge: BaseOracleGeneratorJudge,
+    checkpoint_path: str | Path | None = None,
 ) -> StudyReport:
     """Convenience functional wrapper around ContextSelectionStudy."""
     study = ContextSelectionStudy(config=config, embedder=embedder, oracle_judge=oracle_judge)
-    return study.run(samples)
+    return study.run(samples, checkpoint_path=checkpoint_path)
 
 
 @dataclass

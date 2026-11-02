@@ -219,6 +219,7 @@ def run_benchmark_pipeline(
         config=config,
         embedder=embedder,
         oracle_judge=oracle_judge,
+        checkpoint_path=out_path / "step_a_checkpoint.pt",
     )
 
     # 3. Artifact Caching

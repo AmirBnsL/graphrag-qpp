@@ -175,6 +175,7 @@ class QuantizedVLLMGeneratorJudge(BaseOracleGeneratorJudge):
             "max_model_len": model_len,
             "seed": self.seed,
             "trust_remote_code": True,
+            "enforce_eager": True,
         }
         if quantization:
             kwargs["quantization"] = quantization
