@@ -103,7 +103,8 @@ class PPRRetriever:
         num_nodes = adj.shape[0]
 
         # 1. Compute seed personalization vector p0
-        p0 = np.zeros(num_nodes, dtype=np.float32)
+        p0_ent = np.zeros(num_nodes, dtype=np.float32)
+        p0_pass = np.zeros(num_nodes, dtype=np.float32)
         deg = np.array(adj.sum(axis=1)).flatten()
 
         # Entity seeds: rank entities by cosine similarity with query, weighted by inverse degree
@@ -122,9 +123,12 @@ class PPRRetriever:
                     d = max(deg[global_idx], 1.0)
                     # Degree penalty (inverse log degree) applied in Step 2+ (ADR-0006, Issue #3)
                     if graph.cleanup_stage >= CleanupStage.IDF_DEGREE_DAMPENING:
-                        p0[global_idx] = sc / np.log1p(d)
+                        p0_ent[global_idx] = sc / np.log1p(d)
                     else:
-                        p0[global_idx] = sc
+                        p0_ent[global_idx] = sc
+
+        if p0_ent.sum() > 0:
+            p0_ent = p0_ent / p0_ent.sum()
 
         # Passage seeds: top-3 passages by cosine similarity
         p_indices = graph.passage_indices
@@ -135,12 +139,22 @@ class PPRRetriever:
             sc = float(p_scores[rel_idx])
             if sc > 0:
                 global_idx = p_indices[rel_idx]
-                p0[global_idx] += sc * 0.5
+                p0_pass[global_idx] += sc
 
-        if p0.sum() == 0:
-            p0 = np.ones(num_nodes, dtype=np.float32) / num_nodes
+        if p0_pass.sum() > 0:
+            p0_pass = p0_pass / p0_pass.sum()
+
+        # Entity-centric personalization: 90% entity seed mass + 10% passage seed mass
+        if p0_ent.sum() > 0 and p0_pass.sum() > 0:
+            p0 = 0.90 * p0_ent + 0.10 * p0_pass
+        elif p0_ent.sum() > 0:
+            p0 = p0_ent
+        elif p0_pass.sum() > 0:
+            p0 = p0_pass
         else:
-            p0 = p0 / p0.sum()
+            p0 = np.ones(num_nodes, dtype=np.float32) / num_nodes
+
+        p0 = p0 / p0.sum()
 
         seed_nodes = np.where(p0 > 0)[0].tolist()
 

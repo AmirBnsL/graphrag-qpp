@@ -40,6 +40,7 @@ class QwenEmbedder(BaseEmbedder):
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
         self._model: Any = None
+        self._cache: dict[str, np.ndarray] = {}
 
     def _load_model(self) -> Any:
         if self._model is None:
@@ -51,24 +52,29 @@ class QwenEmbedder(BaseEmbedder):
         return self._model
 
     def embed_texts(self, texts: list[str]) -> np.ndarray:
-        """Compute L2-normalized dense embeddings for a list of texts."""
+        """Compute L2-normalized dense embeddings for a list of texts with in-memory caching."""
         if not texts:
             return np.empty((0, 1024), dtype=np.float32)
 
-        model = self._load_model()
-        with torch.inference_mode():
-            embeddings = model.encode(
-                texts,
-                batch_size=self.batch_size,
-                show_progress_bar=False,
-                normalize_embeddings=self.normalize_embeddings,
-                convert_to_numpy=True,
-            )
-        vecs = np.asarray(embeddings, dtype=np.float32)
-        if not self.normalize_embeddings:
-            norms = np.linalg.norm(vecs, axis=1, keepdims=True)
-            vecs = vecs / np.maximum(norms, 1e-9)
-        return vecs
+        missing_texts = list(dict.fromkeys(t for t in texts if t not in self._cache))
+        if missing_texts:
+            model = self._load_model()
+            with torch.inference_mode():
+                embeddings = model.encode(
+                    missing_texts,
+                    batch_size=self.batch_size,
+                    show_progress_bar=False,
+                    normalize_embeddings=self.normalize_embeddings,
+                    convert_to_numpy=True,
+                )
+            vecs = np.asarray(embeddings, dtype=np.float32)
+            if not self.normalize_embeddings:
+                norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+                vecs = vecs / np.maximum(norms, 1e-9)
+            for t, v in zip(missing_texts, vecs, strict=True):
+                self._cache[t] = v
+
+        return np.stack([self._cache[t] for t in texts]).astype(np.float32)
 
     def unload(self) -> None:
         """Unload embedding model and clear PyTorch CUDA cache."""

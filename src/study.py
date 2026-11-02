@@ -125,6 +125,27 @@ class StudyReport:
             return 0.0
         return float(np.mean([r.semantic_gain for r in self.query_results.values()]))
 
+    @property
+    def mean_access_gini(self) -> float:
+        """Mean Hub Access Gini across all evaluated queries."""
+        if not self.query_results:
+            return 0.0
+        return float(
+            np.mean(
+                [
+                    compute_access_gini(r.candidate_subgraph.ppr_deep, only_positive=True)
+                    for r in self.query_results.values()
+                ]
+            )
+        )
+
+    @property
+    def mean_ppr_entropy_drift(self) -> float:
+        """Mean PPR entropy drift (H(p_deep) - H(p_shallow)) across all evaluated queries."""
+        if not self.query_results:
+            return 0.0
+        return float(np.mean([r.candidate_subgraph.ppr_entropy_drift for r in self.query_results.values()]))
+
     def evaluate_conservative_abstention(
         self,
         tau: float = 0.10,
@@ -542,13 +563,13 @@ class ContextSelectionStudy:
             flat_ans = flat_answers[i]
             graph_ans = graph_answers[i]
             no_rag_ans = no_rag_answers[i]
-            flat_score, graph_score, _ = judged_tuples[i]
+            flat_score, graph_score, sem_gain_val = judged_tuples[i]
 
             gold_ans = sample.gold_answers[0] if sample.gold_answers else ""
             flat_f1 = compute_token_f1(flat_ans, gold_ans)
             graph_f1 = compute_token_f1(graph_ans, gold_ans)
             lexical_gain = graph_f1 - flat_f1
-            semantic_gain = graph_score - flat_score
+            semantic_gain = float(sem_gain_val)
 
             query_results[sample.query_id] = QueryResult(
                 query_id=sample.query_id,

@@ -133,7 +133,11 @@ class TriGraphBuilder:
             if not clean_sents:
                 clean_sents = [p.get("text", "")]
 
-            sess_id = str(p.get("session_id") or "default_session")
+            raw_sess = p.get("session_id")
+            if not raw_sess:
+                pid_str = str(p.get("passage_id") or f"p_{p_idx}")
+                raw_sess = re.sub(r"_c\d+$", "", pid_str)
+            sess_id = str(raw_sess)
             passage_sessions[p_idx] = sess_id
 
             p_sent_indices: list[int] = []

@@ -16,8 +16,10 @@ from src.adapters.vllm_adapter import (
     build_generator_prompt,
     build_judge_prompt,
     build_pairwise_preference_prompt,
+    extract_continuous_rubric_score,
     parse_judge_score,
     parse_pairwise_preference,
+    strip_thinking_tokens,
 )
 from src.data.caching import (
     export_study_summary_json,
@@ -298,4 +300,62 @@ def test_end_to_end_benchmark_pipeline_execution(tmp_path: Path):
     assert len(tables) >= 5
 
     figures = list(results["figures_dir"].glob("*.*"))
-    assert len(figures) >= 8  # 4 figures in both PDF and PNG format
+    assert len(figures) >= 8
+
+
+def test_issue7_remediations_and_summary_metrics(tmp_path: Path):
+    """Verify Issue #7 fixes: thinking token stripping, continuous rubric, summary metrics, and session fallback."""
+    from src.graph.trigraph_builder import CleanupStage, TriGraphBuilder
+
+    # 1. Thinking token stripping
+    assert strip_thinking_tokens("<think>\nLet me analyze the context...\n</think>\nParis is the capital.") == "Paris is the capital."
+    assert strip_thinking_tokens("Answer directly") == "Answer directly"
+
+    # 2. Continuous rubric extraction with mock logprobs
+    class DummyLP:
+        def __init__(self, tok: str, lp: float) -> None:
+            self.decoded_token = tok
+            self.logprob = lp
+
+    class DummyComp:
+        def __init__(self, text: str, logprobs: list[dict[int, DummyLP]] | None = None) -> None:
+            self.text = text
+            self.logprobs = logprobs
+
+    comp_discrete = DummyComp("Score: 0.5", None)
+    assert extract_continuous_rubric_score(comp_discrete) == 0.5
+
+    comp_logprob = DummyComp(
+        "Score: 0.5",
+        [{1: DummyLP("0.5", -0.2), 2: DummyLP("1.0", -1.2), 3: DummyLP("0.0", -3.0)}],
+    )
+    score_cont = extract_continuous_rubric_score(comp_logprob)
+    assert 0.5 < score_cont < 1.0
+
+    # 3. Session ID fallback in TriGraphBuilder for chunked LongMemEval passages
+    embedder = FakeEmbedder()
+    builder = TriGraphBuilder(embedder=embedder)
+    passages = [
+        {"passage_id": "sess_A_c0", "text": "FluxQubit quantum state alpha.", "sentences": ["FluxQubit quantum state alpha."]},
+        {"passage_id": "sess_B_c0", "text": "FluxQubit unrelated recipe beta.", "sentences": ["FluxQubit unrelated recipe beta."]},
+    ]
+    g_step2 = builder.build(passages, stage=CleanupStage.IDF_DEGREE_DAMPENING)
+    g_step3 = builder.build(passages, stage=CleanupStage.SESSION_CONTEXT_CONSTRAINED)
+    assert g_step2.adjacency_matrix.sum() > g_step3.adjacency_matrix.sum()
+
+    # 4. StudyReport mean_access_gini and mean_ppr_entropy_drift properties
+    oracle_judge = FakeOracleGeneratorJudge()
+    samples = [
+        QuerySample(
+            query_id="q_test", dataset="LongMemEval-S", question_type="conversational",
+            question="What is FluxQubit state?", gold_answers=["alpha"],
+            gold_evidence_ids=["sess_A_c0"], corpus_passages=passages,
+        )
+    ]
+    report = run_qpp_study(samples, config=StudyConfig(retrieval_top_k=2), embedder=embedder, oracle_judge=oracle_judge)
+    assert report.mean_access_gini > 0.0
+    assert isinstance(report.mean_ppr_entropy_drift, float)
+    summary_file = export_study_summary_json(report, tmp_path / "study_summary.json")
+    with open(summary_file, "r", encoding="utf-8") as f:
+        sdata = json.load(f)
+    assert sdata["mean_access_gini"] > 0.0  # 4 figures in both PDF and PNG format

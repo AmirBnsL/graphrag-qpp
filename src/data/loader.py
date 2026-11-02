@@ -225,6 +225,7 @@ def load_longmemeval_slice(
                 passages.append(
                     {
                         "passage_id": pid,
+                        "session_id": sess_id,
                         "title": f"Session {sess_id} ({sess_date})",
                         "text": header + full_session_str,
                         "sentences": turns_text[:25],
@@ -243,6 +244,7 @@ def load_longmemeval_slice(
                     passages.append(
                         {
                             "passage_id": chunk_pid,
+                            "session_id": sess_id,
                             "title": f"Session {sess_id} Part {c_idx // step + 1} ({sess_date})",
                             "text": header + chunk_body,
                             "sentences": chunk_turns,

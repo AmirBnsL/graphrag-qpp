@@ -118,10 +118,10 @@ def setup_adapters(mode: str) -> tuple[BaseEmbedder, BaseOracleGeneratorJudge]:
         logger.info("Initializing GPU production adapters (Qwen3-Embedding & Quantized vLLM)...")
         embedder: BaseEmbedder = QwenEmbedder(model_name="Qwen/Qwen3-Embedding-0.6B")
         oracle_judge: BaseOracleGeneratorJudge = QuantizedVLLMGeneratorJudge(
-            generator_model="Qwen/Qwen2.5-7B-Instruct-AWQ",
-            judge_model="neuralmagic/gemma-2-9b-it-FP8",
-            generator_quantization="awq",
-            judge_quantization="fp8",
+            generator_model="RedHatAI/Qwen3.5-9B-FP8-dynamic",
+            judge_model="google/gemma-4-12B-it-qat-w4a16-ct",
+            generator_quantization="fp8",
+            judge_quantization="compressed-tensors",
             gpu_memory_utilization=0.70,
             judge_gpu_memory_utilization=0.80,
             max_model_len=8192,
@@ -255,6 +255,12 @@ def run_benchmark_pipeline(
         tau_sweep=tau_sweep,
         epochs=15,
     )
+    zs_transfer_rev = report_lme.evaluate_gnn_zero_shot_transfer(
+        target_report=report_mh,
+        target="semantic",
+        tau_sweep=tau_sweep,
+        epochs=15,
+    )
 
     # 5. Export LaTeX Tables
     logger.info("Exporting publication LaTeX tables...")
@@ -298,9 +304,10 @@ def run_benchmark_pipeline(
     export_qpp_correlation_table_latex(correlation_metrics, tables_dir / "qpp_correlations.tex")
     export_conservative_abstention_table_latex(gnn_dual["semantic_cv"].tau_sweep_results, tables_dir / "conservative_abstention.tex")
 
-    # Run real 4-stage cleanup ablation without calling LLM
+    # Run real 4-stage cleanup ablation on multi-session LongMemEval-S samples without calling LLM
+    ablation_source = lme_samples if lme_samples else samples
     ablation_report: CleanupAblationReport = evaluate_cleanup_ablation(
-        samples=samples[:min(len(samples), 10)],
+        samples=ablation_source[:min(len(ablation_source), 30)],
         config=config,
         embedder=embedder,
     )
@@ -318,20 +325,36 @@ def run_benchmark_pipeline(
     export_router_disagreement_table_latex(gnn_dual["disagreement_sweep"], tables_dir / "router_disagreement.tex")
 
     transfer_map = {
-        "HotpotQA -> LongMemEval-S": {
-            "source": "HotpotQA",
+        "Multi-Hop -> LongMemEval-S": {
+            "source": "HotpotQA/MuSiQue",
             "target": "LongMemEval-S",
             "setting": "Zero-Shot",
             "spearman_rho": zs_transfer.spearman_rho,
             "mean_achieved_gain": zs_transfer.tau_sweep_results.get(0.10, {}).get("mean_achieved_gain", 0.0),
-        }
+        },
+        "LongMemEval-S -> Multi-Hop": {
+            "source": "LongMemEval-S",
+            "target": "HotpotQA/MuSiQue",
+            "setting": "Zero-Shot",
+            "spearman_rho": zs_transfer_rev.spearman_rho,
+            "mean_achieved_gain": zs_transfer_rev.tau_sweep_results.get(0.10, {}).get("mean_achieved_gain", 0.0),
+        },
     }
     export_zero_shot_transfer_table_latex(transfer_map, tables_dir / "zero_shot_transfer.tex")
 
     # 6. Export Diagnostic Figures (PDF and PNG)
     logger.info("Generating publication diagnostic figures (PDF & PNG)...")
-    plot_conservative_abstention_sweep(gnn_dual["semantic_cv"].tau_sweep_results, figures_dir / "conservative_abstention_sweep.pdf")
-    plot_conservative_abstention_sweep(gnn_dual["semantic_cv"].tau_sweep_results, figures_dir / "conservative_abstention_sweep.png")
+    always_graph = report.mean_semantic_gain
+    plot_conservative_abstention_sweep(
+        gnn_dual["semantic_cv"].tau_sweep_results,
+        figures_dir / "conservative_abstention_sweep.pdf",
+        always_graph_gain=always_graph,
+    )
+    plot_conservative_abstention_sweep(
+        gnn_dual["semantic_cv"].tau_sweep_results,
+        figures_dir / "conservative_abstention_sweep.png",
+        always_graph_gain=always_graph,
+    )
 
     plot_hub_cleanup_ablation(ablation_data, figures_dir / "hub_cleanup_ablation.pdf")
     plot_hub_cleanup_ablation(ablation_data, figures_dir / "hub_cleanup_ablation.png")
@@ -342,7 +365,8 @@ def run_benchmark_pipeline(
         plot_router_disagreement_heatmap(gnn_dual["disagreement_sweep"][heatmap_tau], figures_dir / "router_disagreement_heatmap.png")
 
     transfer_plot_data = [
-        {"name": "Multi-Hop -> Conv", "in_domain_rho": gnn_dual["semantic_cv"].spearman_rho, "zero_shot_rho": zs_transfer.spearman_rho}
+        {"name": "Multi-Hop -> Conv", "in_domain_rho": gnn_dual["semantic_cv"].spearman_rho, "zero_shot_rho": zs_transfer.spearman_rho},
+        {"name": "Conv -> Multi-Hop", "in_domain_rho": gnn_dual["semantic_cv"].spearman_rho, "zero_shot_rho": zs_transfer_rev.spearman_rho},
     ]
     plot_zero_shot_transfer_comparison(transfer_plot_data, figures_dir / "zero_shot_transfer.pdf")
     plot_zero_shot_transfer_comparison(transfer_plot_data, figures_dir / "zero_shot_transfer.png")

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 def plot_conservative_abstention_sweep(
     sweep_results: dict[float, dict[str, Any]],
     output_path: str | Path,
+    always_graph_gain: float | None = None,
 ) -> Path:
     """Plot Mean Achieved Gain and Graph Selection Rate vs Gain Margin Threshold tau (ADR-0005)."""
     taus = sorted(sweep_results.keys())
@@ -24,14 +25,24 @@ def plot_conservative_abstention_sweep(
     oracle = [sweep_results[t].get("mean_oracle_gain", 0.0) for t in taus]
     rates = [sweep_results[t].get("graph_selected_rate", 0.0) * 100.0 for t in taus]
 
-    fig, ax1 = plt.subplots(figsize=(7, 4.5), dpi=300)
+    fig, ax1 = plt.subplots(figsize=(7.2, 4.6), dpi=300)
 
     color_gain = "#1f77b4"
     ax1.set_xlabel(r"Gain Margin Threshold ($\tau$)", fontsize=11, fontweight="medium")
     ax1.set_ylabel("Mean Achieved GraphRAG Gain", color=color_gain, fontsize=11, fontweight="medium")
     l1 = ax1.plot(taus, achieved, "o-", color=color_gain, linewidth=2.2, label=r"Achieved Gain ($\hat{y} \geq \tau$)")
     l2 = ax1.plot(taus, oracle, "--", color="#2ca02c", linewidth=1.8, label="Oracle Context Selector")
-    l3 = ax1.axhline(0.0, color="#d62728", linestyle=":", linewidth=1.5, label="Flat Dense Baseline")
+    l3 = ax1.axhline(0.0, color="#d62728", linestyle=":", linewidth=1.5, label="Flat Dense Baseline (0.0)")
+    extra_lines = []
+    if always_graph_gain is not None:
+        l_ag = ax1.axhline(
+            always_graph_gain,
+            color="#ff7f0e",
+            linestyle="-.",
+            linewidth=1.6,
+            label=f"Always-GraphRAG Baseline ({always_graph_gain:+.3f})",
+        )
+        extra_lines.append(l_ag)
     ax1.tick_params(axis="y", labelcolor=color_gain)
     ax1.grid(True, linestyle="--", alpha=0.5)
 
@@ -42,9 +53,9 @@ def plot_conservative_abstention_sweep(
     ax2.tick_params(axis="y", labelcolor=color_rate)
     ax2.set_ylim(-5, 105)
 
-    lines = l1 + l2 + [l3] + l4
+    lines = l1 + l2 + [l3] + extra_lines + l4
     labels: list[str] = [str(line.get_label()) for line in lines]
-    ax1.legend(handles=lines, labels=labels, loc="upper right", framealpha=0.9, fontsize=9)
+    ax1.legend(handles=lines, labels=labels, loc="upper right", framealpha=0.9, fontsize=8.5)
 
     plt.title("Conservative Graph Abstention Sensitivity", fontsize=12, fontweight="bold")
     plt.tight_layout()
