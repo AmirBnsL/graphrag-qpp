@@ -1,0 +1,20 @@
+\begin{table}[t]
+\centering
+\small
+\caption{Post-Retrieval GraphRAG Gain Prediction Performance on Multi-Hop and Conversational Benchmarks.}
+\label{tab:qpp_correlations}
+\begin{tabular}{llcccc}
+\toprule
+\textbf{Predictor / Router} & \textbf{Type} & \textbf{Spearman $\rho$} & \textbf{$p$-value} & \textbf{MSE} & \textbf{MAE} \\
+\midrule
+NQC & Classical Post & +0.029 & 0.361 & 0.169 & 0.335 \\
+WIG & Classical Post & +0.082 & 0.010 & 0.213 & 0.397 \\
+AVG_IDF & Classical Pre & -0.048 & 0.132 & 1.839 & 1.247 \\
+MAX_IDF & Classical Pre & -0.062 & 0.050 & 9.991 & 3.016 \\
+SCQ & Classical Pre & -0.058 & 0.066 & 1187.886 & 28.936 \\
+QUERY_LENGTH & Classical Pre & +0.000 & 1.000 & 0.101 & 0.213 \\
+Topological LightGBM & Tabular Topo & +0.035 & 0.266 & 0.094 & 0.217 \\
+GATv2 GNN Context Selector & GNN Topo & +0.027 & 0.397 & 0.092 & 0.218 \\
+\bottomrule
+\end{tabular}
+\end{table}

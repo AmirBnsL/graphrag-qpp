@@ -1,9 +1,9 @@
 {
   "total_queries": 1000,
-  "mean_lexical_gain": 0.003705476519899497,
-  "mean_semantic_gain": 0.0045,
-  "mean_access_gini": 0.0,
-  "mean_ppr_entropy_drift": 0.0,
+  "mean_lexical_gain": 0.0016533344781406263,
+  "mean_semantic_gain": -0.09747288064258847,
+  "mean_access_gini": 0.6147468974386825,
+  "mean_ppr_entropy_drift": 0.31858193634815823,
   "config": {
     "retrieval_top_k": 5,
     "cleanup_stage": 3,
