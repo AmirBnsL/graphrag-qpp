@@ -61,17 +61,19 @@ def plot_hub_cleanup_ablation(
     output_path: str | Path,
 ) -> Path:
     """Plot Hub Access Gini suppression and Precision@5 across the 4 cleanup stages."""
-    stages = [s.get("stage", f"Step {i}") for i, s in enumerate(stages_data)]
+    raw_stages = [s.get("stage", f"Step {i}") for i, s in enumerate(stages_data)]
+    stages = [st.replace(" (", "\n(") for st in raw_stages]
     ginis = [s.get("hub_access_gini", 0.0) for s in stages_data]
     precisions = [s.get("precision_at_5", 0.0) for s in stages_data]
 
-    fig, ax1 = plt.subplots(figsize=(7, 4.5), dpi=300)
+    fig, ax1 = plt.subplots(figsize=(7.5, 4.8), dpi=300)
 
     color_gini = "#d62728"
     ax1.set_xlabel("Cross-Session Contamination Cleanup Stage", fontsize=11, fontweight="medium")
     ax1.set_ylabel("Hub Access Gini Coefficient (lower = less hub drift)", color=color_gini, fontsize=11)
     l1 = ax1.plot(stages, ginis, "o-", color=color_gini, linewidth=2.2, label="Hub Access Gini (lower is better)")
     ax1.tick_params(axis="y", labelcolor=color_gini)
+    ax1.tick_params(axis="x", labelsize=8.5)
     ax1.grid(True, linestyle="--", alpha=0.5)
 
     ax2 = ax1.twinx()

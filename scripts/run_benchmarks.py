@@ -336,9 +336,10 @@ def run_benchmark_pipeline(
     plot_hub_cleanup_ablation(ablation_data, figures_dir / "hub_cleanup_ablation.pdf")
     plot_hub_cleanup_ablation(ablation_data, figures_dir / "hub_cleanup_ablation.png")
 
-    if 0.10 in gnn_dual["disagreement_sweep"]:
-        plot_router_disagreement_heatmap(gnn_dual["disagreement_sweep"][0.10], figures_dir / "router_disagreement_heatmap.pdf")
-        plot_router_disagreement_heatmap(gnn_dual["disagreement_sweep"][0.10], figures_dir / "router_disagreement_heatmap.png")
+    heatmap_tau = 0.0 if 0.0 in gnn_dual["disagreement_sweep"] else (0.10 if 0.10 in gnn_dual["disagreement_sweep"] else next(iter(gnn_dual["disagreement_sweep"]), None))
+    if heatmap_tau is not None:
+        plot_router_disagreement_heatmap(gnn_dual["disagreement_sweep"][heatmap_tau], figures_dir / "router_disagreement_heatmap.pdf")
+        plot_router_disagreement_heatmap(gnn_dual["disagreement_sweep"][heatmap_tau], figures_dir / "router_disagreement_heatmap.png")
 
     transfer_plot_data = [
         {"name": "Multi-Hop -> Conv", "in_domain_rho": gnn_dual["semantic_cv"].spearman_rho, "zero_shot_rho": zs_transfer.spearman_rho}
