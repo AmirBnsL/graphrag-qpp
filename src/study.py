@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import collections
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from src.adapters.base import BaseEmbedder, BaseOracleGeneratorJudge
 from src.data.loader import QuerySample
@@ -423,9 +426,13 @@ class ContextSelectionStudy:
         all_qpp: dict[str, list[float]] = collections.defaultdict(list)
 
         # Step A: Perform retrieval and classical QPP indexing for all samples
+        logger.info("Step A: Batch-embedding %d query questions...", len(samples))
+        all_q_vecs = self.embedder.embed_texts([sample.question for sample in samples])
         intermediate: list[dict[str, Any]] = []
-        for sample in samples:
-            q_vec = self.embedder.embed_texts([sample.question])[0]
+        for idx, sample in enumerate(samples):
+            if (idx + 1) % 50 == 0 or idx == len(samples) - 1:
+                logger.info("Step A Progress: [%d/%d] queries indexed", idx + 1, len(samples))
+            q_vec = all_q_vecs[idx] if len(all_q_vecs) > idx else self.embedder.embed_texts([sample.question])[0]
             trigraph = self.builder.build(sample.corpus_passages, stage=self.config.cleanup_stage)
 
             flat_top = self.retriever.retrieve_flat(
@@ -444,6 +451,7 @@ class ContextSelectionStudy:
                 flat_passages=flat_top,
                 corpus_passages=sample.corpus_passages,
                 embedder=self.embedder,
+                query_vec=q_vec,
             )
             for k, v in cqpp.items():
                 all_qpp[k].append(v)

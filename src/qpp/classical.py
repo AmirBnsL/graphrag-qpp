@@ -36,6 +36,7 @@ def compute_classical_qpp(
     flat_passages: list[dict[str, Any]],
     corpus_passages: list[dict[str, Any]],
     embedder: BaseEmbedder,
+    query_vec: np.ndarray | None = None,
 ) -> dict[str, float]:
     """Compute pre-retrieval and post-retrieval classical QPP signals."""
     idf_dict, n_docs = compute_idf_dict(corpus_passages)
@@ -52,7 +53,7 @@ def compute_classical_qpp(
     # 2. Post-retrieval Score Variance (NQC & WIG) on Flat top-k
     flat_texts = [p.get("text", "") for p in flat_passages]
     if flat_texts:
-        q_vec = embedder.embed_texts([query])[0]
+        q_vec = query_vec if query_vec is not None else embedder.embed_texts([query])[0]
         flat_embeds = embedder.embed_texts(flat_texts)
         scores = np.dot(flat_embeds, q_vec)
 

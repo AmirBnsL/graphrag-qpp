@@ -26,7 +26,7 @@ class QwenEmbedder(BaseEmbedder):
         self,
         model_name: str = "Qwen/Qwen3-Embedding-0.6B",
         device: str | None = None,
-        batch_size: int = 16,
+        batch_size: int = 64,
         max_seq_length: int = 512,
         normalize_embeddings: bool = True,
     ) -> None:

@@ -92,6 +92,12 @@ def parse_args() -> argparse.Namespace:
         help="Directory to save Parquet, .pt, LaTeX tables, and PDF/PNG figures.",
     )
     parser.add_argument(
+        "--backup-dir",
+        type=str,
+        default=None,
+        help="Optional secondary directory (e.g. Google Drive mount) to mirror all exported artifacts.",
+    )
+    parser.add_argument(
         "--cleanup-stage",
         choices=["0", "1", "2", "3", "raw", "lemmatized", "idf", "context_filtered"],
         default="context_filtered",
@@ -132,6 +138,7 @@ def run_benchmark_pipeline(
     max_queries_lme: int = 500,
     max_queries_multihop: int = 500,
     output_dir: str | Path = "artifacts/benchmark_run",
+    backup_dir: str | Path | None = None,
     cleanup_stage_str: str = "context_filtered",
     tau_sweep: list[float] | None = None,
 ) -> dict[str, Any]:
@@ -338,6 +345,13 @@ def run_benchmark_pipeline(
     plot_zero_shot_transfer_comparison(transfer_plot_data, figures_dir / "zero_shot_transfer.pdf")
     plot_zero_shot_transfer_comparison(transfer_plot_data, figures_dir / "zero_shot_transfer.png")
 
+    if backup_dir:
+        import shutil
+        b_path = Path(backup_dir)
+        b_path.mkdir(parents=True, exist_ok=True)
+        logger.info("Mirroring artifacts to backup directory: %s", b_path)
+        shutil.copytree(out_path, b_path, dirs_exist_ok=True)
+
     logger.info("Pipeline execution completed successfully.")
     return {
         "report": report,
@@ -361,6 +375,7 @@ def main() -> None:
         max_queries_lme=args.max_queries_lme,
         max_queries_multihop=args.max_queries_multihop,
         output_dir=args.output_dir,
+        backup_dir=args.backup_dir,
         cleanup_stage_str=args.cleanup_stage,
         tau_sweep=tau_sweep,
     )
